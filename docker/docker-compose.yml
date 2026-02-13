@@ -1,0 +1,133 @@
+# StreamInfa — Local Development Stack
+# (from docker.md §2.1)
+#
+# Usage:
+#   docker-compose up -d                    # Start all services
+#   docker-compose up -d minio minio-setup  # Start only MinIO (for integration tests)
+#   docker-compose down -v                  # Stop and remove volumes
+
+version: "3.8"
+
+services:
+  # --------------------------------------------------------
+  # StreamInfa application (built from source)
+  # --------------------------------------------------------
+  streaminfa:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "1935:1935"   # RTMP ingest
+      - "8080:8080"   # HTTP (control + delivery + metrics)
+    environment:
+      - STREAMINFA_ENV=development
+      - STREAMINFA_SERVER_HOST=0.0.0.0
+      - STREAMINFA_SERVER_CONTROL_PORT=8080
+      - STREAMINFA_SERVER_RTMP_PORT=1935
+      - STREAMINFA_STORAGE_ENDPOINT=http://minio:9000
+      - STREAMINFA_STORAGE_BUCKET=streaminfa-media
+      - STREAMINFA_STORAGE_ACCESS_KEY_ID=minioadmin
+      - STREAMINFA_STORAGE_SECRET_ACCESS_KEY=minioadmin
+      - STREAMINFA_STORAGE_REGION=us-east-1
+      - STREAMINFA_STORAGE_PATH_STYLE=true
+      - STREAMINFA_OBSERVABILITY_LOG_LEVEL=debug
+      - STREAMINFA_OBSERVABILITY_LOG_FORMAT=pretty
+      - STREAMINFA_AUTH_ADMIN_BEARER_TOKENS=at_dev_token_for_local_testing_only
+    volumes:
+      - upload-tmp:/tmp/streaminfa/uploads
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+
+  # --------------------------------------------------------
+  # MinIO — S3-compatible object storage
+  # --------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # MinIO Console (web UI)
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # --------------------------------------------------------
+  # MinIO setup — create bucket on first run
+  # --------------------------------------------------------
+  minio-setup:
+    image: minio/mc:latest
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb local/streaminfa-media --ignore-existing;
+      mc anonymous set download local/streaminfa-media;
+      echo 'Bucket setup complete';
+      "
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # --------------------------------------------------------
+  # Prometheus — metrics collection
+  # (from docker.md §2.1)
+  # --------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+
+  # --------------------------------------------------------
+  # Grafana — dashboards and alerting
+  # (from docker.md §2.1)
+  # --------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - grafana-data:/var/lib/grafana
+
+  # --------------------------------------------------------
+  # Jaeger — distributed tracing
+  # (from docker.md §2.1)
+  # --------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.56
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+volumes:
+  minio-data:
+  prometheus-data:
+  grafana-data:
+  upload-tmp:

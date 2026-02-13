@@ -1,0 +1,13 @@
+# StreamInfa — Prometheus scrape configuration
+# (from docker.md §2.2)
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "streaminfa"
+    static_configs:
+      - targets: ["streaminfa:8080"]
+    metrics_path: /metrics
+    scrape_interval: 5s

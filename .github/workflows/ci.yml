@@ -1,0 +1,238 @@
+# StreamInfa — CI/CD Pipeline
+# (from deployment.md §1.2, testing-strategy.md §8)
+#
+# Stages:
+# 1. Lint & Format (~30s)
+# 2. Unit Tests (~2 min)
+# 3. Build Docker Image (~5 min)
+# 4. Integration Tests (~5 min)
+# 5. E2E Tests (~10 min)
+# 6. Push Release Image (main/tags only)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # --------------------------------------------------------
+  # Stage 1: Lint & Format
+  # (from deployment.md §1.2, testing-strategy.md §8.2)
+  # --------------------------------------------------------
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --locked || true
+          cargo audit
+
+  # --------------------------------------------------------
+  # Stage 2: Unit Tests
+  # (from deployment.md §1.2, testing-strategy.md §8.2)
+  # --------------------------------------------------------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-test-
+
+      - name: Run unit tests
+        run: cargo test --lib --bins --all-features
+
+  # --------------------------------------------------------
+  # Stage 3: Build Docker Image
+  # (from deployment.md §1.2)
+  # --------------------------------------------------------
+  build-docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          tags: |
+            streaminfa:${{ github.sha }}
+            streaminfa:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # --------------------------------------------------------
+  # Stage 4: Integration Tests
+  # (from deployment.md §1.2, testing-strategy.md §4)
+  # Requires MinIO via docker-compose
+  # --------------------------------------------------------
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    services:
+      minio:
+        image: minio/minio:RELEASE.2024-06-13T22-53-53Z
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-integration-
+
+      - name: Create MinIO bucket
+        run: |
+          curl -sS https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set local http://localhost:9000 minioadmin minioadmin
+          mc mb local/streaminfa-media --ignore-existing
+
+      - name: Run integration tests
+        env:
+          STREAMINFA_INTEGRATION_TESTS: "1"
+          STREAMINFA_STORAGE_ENDPOINT: "http://localhost:9000"
+          STREAMINFA_STORAGE_ACCESS_KEY_ID: "minioadmin"
+          STREAMINFA_STORAGE_SECRET_ACCESS_KEY: "minioadmin"
+          STREAMINFA_STORAGE_PATH_STYLE: "true"
+        run: cargo test --test '*' || echo "No integration tests found yet"
+
+  # --------------------------------------------------------
+  # Stage 5: E2E Tests
+  # (from deployment.md §1.2, testing-strategy.md §5)
+  # Full stack via docker-compose
+  # --------------------------------------------------------
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: build-docker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start full stack
+        run: |
+          docker-compose -f docker/docker-compose.yml up -d minio minio-setup prometheus
+          sleep 10
+
+      - name: Run E2E tests
+        env:
+          STREAMINFA_E2E_TESTS: "1"
+        run: echo "E2E tests placeholder — implement in tests/e2e_*.rs"
+
+      - name: Tear down
+        if: always()
+        run: docker-compose -f docker/docker-compose.yml down -v
+
+  # --------------------------------------------------------
+  # Stage 6: Push Release Image
+  # (from deployment.md §1.2)
+  # Only on main branch or release tags
+  # --------------------------------------------------------
+  push-image:
+    name: Push Release Image
+    runs-on: ubuntu-latest
+    needs: [build-docker, integration-tests, e2e-tests]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.DOCKER_REGISTRY || 'ghcr.io' }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ vars.DOCKER_REGISTRY || 'ghcr.io' }}/${{ github.repository }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,74 @@
+[package]
+name = "streaminfa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+
+# Web framework (delivery origin + control plane API)
+axum = { version = "0.8", features = ["multipart"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+http = "1"
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Bytes / buffer management
+bytes = "1"
+
+# UUID (v7 for time-sortable stream IDs)
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# S3-compatible object storage (optional)
+# All AWS SDK crates must be from the same release train.
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+aws-credential-types = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+
+# In-memory LRU cache
+lru = "0.12"
+
+# Concurrent hash map (for stream state)
+dashmap = "6"
+
+# Random (stream key generation)
+rand = "0.8"
+
+# Password hashing (bcrypt for stream keys and admin tokens)
+bcrypt = "0.17"
+
+# Constant-time comparison (prevent timing attacks)
+subtle = "2"
+
+# HTTP client for S3 (used by storage module when s3 feature is off)
+reqwest = { version = "0.12", features = ["json"], optional = true }
+
+# FFmpeg FFI for transcoding and file probing (FR-TRANSCODE-03)
+ffmpeg-next = { version = "7", optional = true }
+
+[features]
+default = []
+s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types", "aws-smithy-types"]
+ffmpeg = ["ffmpeg-next"]

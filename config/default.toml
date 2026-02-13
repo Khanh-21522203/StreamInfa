@@ -1,0 +1,99 @@
+[server]
+host = "0.0.0.0"
+control_port = 8080
+rtmp_port = 1935
+
+[ingest]
+max_bitrate_kbps = 20000
+max_upload_size_bytes = 10737418240  # 10 GB
+allowed_codecs = ["h264"]
+allowed_audio_codecs = ["aac", "mp3"]
+max_duration_secs = 21600.0         # 6 hours
+upload_timeout_secs = 60
+max_concurrent_rtmp_connections = 50
+max_concurrent_live_streams = 10
+max_concurrent_uploads = 10
+max_pending_connections = 100
+
+[transcode]
+keyframe_interval_secs = 2
+max_blocking_threads = 64
+
+[[transcode.profile_ladder]]
+name = "high"
+width = 1920
+height = 1080
+bitrate_kbps = 3500
+audio_bitrate_kbps = 128
+profile = "high"
+level = "4.1"
+preset = "medium"
+
+[[transcode.profile_ladder]]
+name = "medium"
+width = 1280
+height = 720
+bitrate_kbps = 2000
+audio_bitrate_kbps = 128
+profile = "main"
+level = "3.1"
+preset = "medium"
+
+[[transcode.profile_ladder]]
+name = "low"
+width = 854
+height = 480
+bitrate_kbps = 1000
+audio_bitrate_kbps = 96
+profile = "main"
+level = "3.0"
+preset = "medium"
+
+[packaging]
+segment_duration_secs = 6
+live_window_segments = 5
+hls_version = 7
+segment_retention_minutes = 60
+
+[storage]
+backend = "s3"
+endpoint = "http://localhost:9000"
+bucket = "streaminfa-media"
+access_key_id = ""
+secret_access_key = ""
+region = "us-east-1"
+path_style = true
+max_concurrent_requests = 50
+request_timeout_secs = 30
+
+[cache]
+enabled = true
+max_size_bytes = 536870912    # 512 MB
+ttl_secs = 300                # 5 minutes (master playlist)
+segment_ttl_secs = 3600       # 1 hour (immutable segments)
+
+[delivery]
+cache_control_live = "no-cache, no-store"
+cache_control_vod = "public, max-age=86400"
+cors_allowed_origins = ["*"]
+
+[observability]
+log_level = "info"
+log_format = "json"
+metrics_enabled = true
+tracing_enabled = false
+tracing_endpoint = "http://localhost:4317"
+tracing_sample_rate = 0.1
+
+[security]
+max_rtmp_chunk_size = 65536
+max_amf_string_length = 4096
+max_flv_tag_size_bytes = 16777216    # 16 MB
+max_json_body_bytes = 1048576        # 1 MB
+brute_force_max_attempts = 5
+brute_force_window_secs = 60
+brute_force_block_secs = 300         # 5 minutes
+
+[auth]
+ingest_stream_keys = []
+admin_bearer_tokens = []
