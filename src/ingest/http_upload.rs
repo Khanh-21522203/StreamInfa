@@ -246,6 +246,7 @@ pub fn ingest_error_to_status_code(err: &IngestError) -> u16 {
         | IngestError::InvalidResolution { .. }
         | IngestError::DurationExceeded { .. }
         | IngestError::CorruptFile { .. } => 422,
+        IngestError::InsufficientStorage { .. } => 507,
         _ => 500,
     }
 }

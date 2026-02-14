@@ -46,7 +46,8 @@ pub struct ObjectCache {
 impl ObjectCache {
     pub fn new(config: &CacheConfig) -> Self {
         // Use a large capacity for the LRU; actual bounding is by size
-        let cap = NonZeroUsize::new(100_000).unwrap();
+        // SAFETY: 100_000 is always non-zero
+        let cap = NonZeroUsize::new(100_000).expect("cache capacity must be non-zero");
         Self {
             cache: Mutex::new(LruCache::new(cap)),
             config: config.clone(),
@@ -58,13 +59,13 @@ impl ObjectCache {
     ///
     /// Returns `Some((data, content_type, etag))` on hit, `None` on miss.
     pub fn get(&self, key: &str) -> Option<(Bytes, String, String)> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = cache.get(key) {
             if entry.is_expired() {
                 // TTL expired — remove and return miss
-                let entry = cache.pop(key).unwrap();
-                let mut size = self.current_size.lock().unwrap();
+                let entry = cache.pop(key)?;
+                let mut size = self.current_size.lock().unwrap_or_else(|e| e.into_inner());
                 *size = size.saturating_sub(entry.size);
                 trace!(key, "cache entry expired");
                 return None;
@@ -106,8 +107,8 @@ impl ObjectCache {
             size: entry_size,
         };
 
-        let mut cache = self.cache.lock().unwrap();
-        let mut current_size = self.current_size.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current_size = self.current_size.lock().unwrap_or_else(|e| e.into_inner());
 
         // Evict until we have room
         while *current_size + entry_size > self.config.max_size_bytes {

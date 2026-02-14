@@ -35,16 +35,17 @@ const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 10;
 /// - VOD: sequential file read, offline, batch segment emission
 pub struct TranscodePipeline {
     config: TranscodeConfig,
+    state_manager: Arc<StreamStateManager>,
     cancel: CancellationToken,
 }
 
 impl TranscodePipeline {
     pub fn new(
         config: TranscodeConfig,
-        _state_manager: Arc<StreamStateManager>,
+        state_manager: Arc<StreamStateManager>,
         cancel: CancellationToken,
     ) -> Self {
-        Self { config, cancel }
+        Self { config, state_manager, cancel }
     }
 
     /// Start a live transcode pipeline for a stream.
@@ -75,6 +76,13 @@ impl TranscodePipeline {
         }
 
         obs::set_transcode_active_jobs(1.0);
+
+        // Register expected rendition count for PROCESSING → READY auto-transition
+        // (media-lifecycle.md §3.2 Step 8)
+        self.state_manager
+            .set_expected_renditions(stream_id, renditions.len())
+            .await;
+
         info!(
             %stream_id,
             rendition_count = renditions.len(),
@@ -168,7 +176,15 @@ impl TranscodePipeline {
         // Flush all accumulators
         for (rendition, acc) in accumulators {
             if let Some(segment) = acc.flush() {
-                if segment_tx.send(segment).await.is_err() {
+                if crate::core::metrics::send_with_backpressure(
+                    &segment_tx,
+                    segment,
+                    "transcode_packager",
+                    crate::core::types::TRANSCODE_PACKAGER_CHANNEL_CAP,
+                )
+                .await
+                .is_err()
+                {
                     warn!(%stream_id, rendition = %rendition.id, "packager channel closed during flush");
                 }
             }
@@ -213,7 +229,15 @@ impl TranscodePipeline {
                     &rendition.id.to_string(),
                     segment.duration_secs,
                 );
-                if segment_tx.send(segment).await.is_err() {
+                if crate::core::metrics::send_with_backpressure(
+                    segment_tx,
+                    segment,
+                    "transcode_packager",
+                    crate::core::types::TRANSCODE_PACKAGER_CHANNEL_CAP,
+                )
+                .await
+                .is_err()
+                {
                     return Err(TranscodeError::Cancelled {
                         stream_id: frame.stream_id,
                     });

@@ -67,6 +67,19 @@ pub trait MediaStore: Send + Sync {
         &self,
         prefix: &str,
     ) -> impl std::future::Future<Output = Result<Vec<ObjectInfo>, StorageError>> + Send;
+
+    /// Write metadata JSON to storage (storage-and-delivery.md §4).
+    fn put_metadata(
+        &self,
+        path: &str,
+        metadata: &str,
+    ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send;
+
+    /// HEAD an object to get metadata without downloading the body (storage-and-delivery.md §4).
+    fn head_object(
+        &self,
+        path: &str,
+    ) -> impl std::future::Future<Output = Result<ObjectMeta, StorageError>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +102,15 @@ pub struct ObjectInfo {
     pub key: String,
     pub size: u64,
     pub last_modified: DateTime<Utc>,
+}
+
+/// Metadata returned by a HEAD object operation (storage-and-delivery.md §4).
+#[derive(Debug, Clone)]
+pub struct ObjectMeta {
+    pub content_length: u64,
+    pub content_type: String,
+    pub last_modified: DateTime<Utc>,
+    pub etag: String,
 }
 
 // ---------------------------------------------------------------------------

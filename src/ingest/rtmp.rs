@@ -608,8 +608,17 @@ impl RtmpConnection {
                                 &stream_id.to_string(),
                                 frame.data.len() as u64,
                             );
-                            // Send to transcode pipeline with backpressure
-                            if frame_tx.send(frame).await.is_err() {
+                            // Send to transcode pipeline with backpressure metrics
+                            // (performance-and-backpressure.md §4.4)
+                            if crate::core::metrics::send_with_backpressure(
+                                &frame_tx,
+                                frame,
+                                "ingest_transcode",
+                                crate::core::types::INGEST_TRANSCODE_CHANNEL_CAP,
+                            )
+                            .await
+                            .is_err()
+                            {
                                 info!(%stream_id, "transcode channel closed, ending stream");
                                 break;
                             }

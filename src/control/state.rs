@@ -42,12 +42,34 @@ impl std::fmt::Display for StreamState {
     }
 }
 
+/// Per-rendition progress tracking (from control-plane-vs-data-plane.md §2.1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RenditionStatus {
+    pub rendition: String,
+    pub segments_produced: u64,
+    pub last_segment_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub status: RenditionState,
+}
+
+/// State of a single rendition within a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RenditionState {
+    /// Rendition is actively being produced.
+    Active,
+    /// Rendition is complete (all segments written).
+    Complete,
+}
+
 /// A tracked stream with its current state and metadata.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StreamEntry {
     pub state: StreamState,
     pub metadata: StreamMetadata,
     pub error_message: Option<String>,
+    /// Per-rendition progress (from control-plane-vs-data-plane.md §2.1).
+    pub renditions: HashMap<String, RenditionStatus>,
+    /// Expected number of renditions for this stream (set by transcode pipeline).
+    pub expected_renditions: Option<usize>,
 }
 
 /// In-memory stream state manager backed by `DashMap` for lock-free concurrent access.
@@ -73,6 +95,8 @@ impl StreamStateManager {
             state: StreamState::Pending,
             metadata,
             error_message: None,
+            renditions: HashMap::new(),
+            expected_renditions: None,
         };
 
         self.streams.insert(stream_id, entry.clone());
@@ -191,15 +215,74 @@ impl StreamStateManager {
         }
     }
 
+    /// Set the expected number of renditions for a stream.
+    /// Called by the transcode pipeline on startup.
+    pub async fn set_expected_renditions(&self, stream_id: StreamId, count: usize) {
+        if let Some(mut entry) = self.streams.get_mut(&stream_id) {
+            entry.expected_renditions = Some(count);
+            debug!(%stream_id, count, "expected renditions set");
+        }
+    }
+
     /// Update rendition progress for a stream (called when a segment is produced).
+    /// Tracks per-rendition segment counts and timestamps.
     pub async fn update_rendition_progress(
         &self,
         stream_id: StreamId,
         rendition: &str,
         sequence: u64,
     ) {
-        if self.streams.contains_key(&stream_id) {
+        if let Some(mut entry) = self.streams.get_mut(&stream_id) {
+            let status = entry.renditions.entry(rendition.to_string()).or_insert_with(|| {
+                RenditionStatus {
+                    rendition: rendition.to_string(),
+                    segments_produced: 0,
+                    last_segment_time: None,
+                    status: RenditionState::Active,
+                }
+            });
+            status.segments_produced = sequence;
+            status.last_segment_time = Some(chrono::Utc::now());
             debug!(%stream_id, %rendition, sequence, "rendition progress updated");
+        }
+    }
+
+    /// Mark a rendition as complete. If all expected renditions are complete,
+    /// auto-transition from PROCESSING → READY (media-lifecycle.md §3.2 Step 8).
+    pub async fn mark_rendition_complete(
+        &self,
+        stream_id: StreamId,
+        rendition: &str,
+    ) -> Option<StreamEntry> {
+        let should_transition = {
+            let mut entry = self.streams.get_mut(&stream_id)?;
+            if let Some(status) = entry.renditions.get_mut(rendition) {
+                status.status = RenditionState::Complete;
+            }
+            // Check if all expected renditions are complete
+            if let Some(expected) = entry.expected_renditions {
+                let complete_count = entry.renditions.values()
+                    .filter(|r| r.status == RenditionState::Complete)
+                    .count();
+                entry.state == StreamState::Processing && complete_count >= expected
+            } else {
+                false
+            }
+        };
+
+        if should_transition {
+            match self.transition(stream_id, StreamState::Ready).await {
+                Ok(updated) => {
+                    info!(%stream_id, "all renditions complete, transitioned to READY");
+                    Some(updated)
+                }
+                Err(e) => {
+                    warn!(%stream_id, error = %e, "failed auto-transition to READY");
+                    None
+                }
+            }
+        } else {
+            self.streams.get(&stream_id).map(|r| r.clone())
         }
     }
 

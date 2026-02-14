@@ -90,7 +90,11 @@ pub fn build_router(
             "/api/v1/streams/{stream_id}",
             get(handlers::get_stream).delete(handlers::delete_stream),
         )
-        .route("/api/v1/upload", post(handlers::upload_vod))
+        .route("/api/v1/streams/upload", post(handlers::upload_vod))
+        .route(
+            "/api/v1/streams/{stream_id}/rotate-key",
+            post(handlers::rotate_stream_key),
+        )
         // Health endpoints
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::readyz))

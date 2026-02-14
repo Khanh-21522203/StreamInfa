@@ -234,6 +234,10 @@ pub fn inc_transcode_error(stream_id: &str, error_type: &str) {
     counter!("streaminfa_transcode_errors_total", "stream_id" => stream_id.to_string(), "error_type" => error_type.to_string()).increment(1);
 }
 
+pub fn set_vod_progress(stream_id: &str, percent: f64) {
+    gauge!("streaminfa_vod_progress_percent", "stream_id" => stream_id.to_string()).set(percent);
+}
+
 // -- Packaging --
 
 pub fn inc_package_segments_written(stream_id: &str, rendition: &str) {

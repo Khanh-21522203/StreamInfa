@@ -319,6 +319,49 @@ impl MediaStore for S3MediaStore {
         Ok(deleted_count)
     }
 
+    async fn put_metadata(&self, path: &str, metadata: &str) -> Result<(), StorageError> {
+        self.put_with_retry(
+            path,
+            Bytes::from(metadata.to_string()),
+            "application/json",
+        )
+        .await
+    }
+
+    async fn head_object(&self, path: &str) -> Result<super::ObjectMeta, StorageError> {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(path)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                let content_length = output.content_length.unwrap_or(0) as u64;
+                let content_type = output
+                    .content_type
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                let etag = output.e_tag.unwrap_or_default();
+                let last_modified = output
+                    .last_modified
+                    .and_then(|t| DateTime::from_timestamp(t.secs(), t.subsec_nanos()))
+                    .unwrap_or_else(Utc::now);
+
+                Ok(super::ObjectMeta {
+                    content_length,
+                    content_type,
+                    last_modified,
+                    etag,
+                })
+            }
+            Err(e) => Err(StorageError::S3GetFailed {
+                path: path.to_string(),
+                reason: e.to_string(),
+            }),
+        }
+    }
+
     async fn list_objects(&self, prefix: &str) -> Result<Vec<ObjectInfo>, StorageError> {
         let mut objects = Vec::new();
         let mut continuation_token: Option<String> = None;

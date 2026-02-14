@@ -161,6 +161,33 @@ impl MediaStore for InMemoryMediaStore {
         result.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(result)
     }
+
+    async fn put_metadata(&self, path: &str, metadata: &str) -> Result<(), StorageError> {
+        let mut objects = self.objects.write().await;
+        objects.insert(
+            path.to_string(),
+            StoredObject {
+                data: Bytes::from(metadata.to_string()),
+                content_type: "application/json".to_string(),
+                created_at: Utc::now(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn head_object(&self, path: &str) -> Result<super::ObjectMeta, StorageError> {
+        let objects = self.objects.read().await;
+        let obj = objects.get(path).ok_or_else(|| StorageError::S3GetFailed {
+            path: path.to_string(),
+            reason: "not found".to_string(),
+        })?;
+        Ok(super::ObjectMeta {
+            content_length: obj.data.len() as u64,
+            content_type: obj.content_type.clone(),
+            last_modified: obj.created_at,
+            etag: format!("\"{}\"", obj.data.len()),
+        })
+    }
 }
 
 #[cfg(test)]

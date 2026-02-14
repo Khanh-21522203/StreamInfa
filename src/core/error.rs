@@ -58,6 +58,9 @@ pub enum IngestError {
     #[error("validation failed: {reason}")]
     ValidationFailed { reason: String },
 
+    #[error("insufficient storage: {reason}")]
+    InsufficientStorage { reason: String },
+
     #[error("ingest I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -135,4 +138,66 @@ pub enum StateError {
 
     #[error("stream not found: {stream_id}")]
     StreamNotFound { stream_id: StreamId },
+}
+
+// ---------------------------------------------------------------------------
+// Delivery errors (from storage-and-delivery.md §6.5, overview.md §6.1)
+// ---------------------------------------------------------------------------
+
+/// Errors originating from the delivery module.
+#[derive(Debug, Error)]
+pub enum DeliveryError {
+    #[error("stream not found: {stream_id}")]
+    StreamNotFound { stream_id: String },
+
+    #[error("segment not found: {path}")]
+    SegmentNotFound { path: String },
+
+    #[error("rendition not found: {rendition} for stream {stream_id}")]
+    RenditionNotFound { stream_id: String, rendition: String },
+
+    #[error("stream not ready: {stream_id} is in state {state}")]
+    StreamNotReady { stream_id: String, state: String },
+
+    #[error("stream has been deleted: {stream_id}")]
+    StreamDeleted { stream_id: String },
+
+    #[error("range not satisfiable: {reason}")]
+    RangeNotSatisfiable { reason: String },
+
+    #[error("storage backend error: {reason}")]
+    StorageBackendError { reason: String },
+
+    #[error("service unavailable: {reason}")]
+    ServiceUnavailable { reason: String },
+}
+
+impl DeliveryError {
+    /// Map a DeliveryError to its HTTP status code (storage-and-delivery.md §6.5).
+    pub fn status_code(&self) -> u16 {
+        match self {
+            DeliveryError::StreamNotFound { .. } => 404,
+            DeliveryError::SegmentNotFound { .. } => 404,
+            DeliveryError::RenditionNotFound { .. } => 404,
+            DeliveryError::StreamNotReady { .. } => 409,
+            DeliveryError::StreamDeleted { .. } => 410,
+            DeliveryError::RangeNotSatisfiable { .. } => 416,
+            DeliveryError::StorageBackendError { .. } => 502,
+            DeliveryError::ServiceUnavailable { .. } => 503,
+        }
+    }
+
+    /// Return the error code string for JSON responses.
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            DeliveryError::StreamNotFound { .. } => "stream_not_found",
+            DeliveryError::SegmentNotFound { .. } => "segment_not_found",
+            DeliveryError::RenditionNotFound { .. } => "rendition_not_found",
+            DeliveryError::StreamNotReady { .. } => "stream_not_ready",
+            DeliveryError::StreamDeleted { .. } => "stream_error",
+            DeliveryError::RangeNotSatisfiable { .. } => "range_not_satisfiable",
+            DeliveryError::StorageBackendError { .. } => "storage_error",
+            DeliveryError::ServiceUnavailable { .. } => "service_unavailable",
+        }
+    }
 }

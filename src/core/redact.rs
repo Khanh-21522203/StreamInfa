@@ -61,7 +61,7 @@ pub fn redact_bearer_token(header_value: &str) -> String {
 /// Check if a field name is sensitive and should be redacted.
 ///
 /// From security.md §7.1: token, key, secret, password, authorization.
-fn _is_sensitive_field(field_name: &str) -> bool {
+pub fn is_sensitive_field(field_name: &str) -> bool {
     let lower = field_name.to_lowercase();
     lower.contains("token")
         || lower.contains("key")
@@ -104,12 +104,12 @@ mod tests {
 
     #[test]
     fn test_is_sensitive_field() {
-        assert!(_is_sensitive_field("auth_token"));
-        assert!(_is_sensitive_field("stream_key"));
-        assert!(_is_sensitive_field("secret_access_key"));
-        assert!(_is_sensitive_field("password"));
-        assert!(_is_sensitive_field("Authorization"));
-        assert!(!_is_sensitive_field("stream_id"));
-        assert!(!_is_sensitive_field("status"));
+        assert!(is_sensitive_field("auth_token"));
+        assert!(is_sensitive_field("stream_key"));
+        assert!(is_sensitive_field("secret_access_key"));
+        assert!(is_sensitive_field("password"));
+        assert!(is_sensitive_field("Authorization"));
+        assert!(!is_sensitive_field("stream_id"));
+        assert!(!is_sensitive_field("status"));
     }
 }

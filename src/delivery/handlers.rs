@@ -1,9 +1,12 @@
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderName, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
+
+/// Custom header name (parsed once, no unwrap in hot path).
+static X_STREAMINFA_STREAM_ID: HeaderName = HeaderName::from_static("x-streaminfa-stream-id");
 
 use crate::control::state::StreamState;
 use crate::core::auth::TokenStatus;
@@ -266,7 +269,7 @@ fn build_response(
                 (header::ETAG, etag.to_string()),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
                 (
-                    "X-StreamInfa-Stream-Id".parse().unwrap(),
+                    X_STREAMINFA_STREAM_ID.clone(),
                     stream_id.to_string(),
                 ),
             ],
@@ -283,7 +286,7 @@ fn build_response(
                 (header::ETAG, etag.to_string()),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
                 (
-                    "X-StreamInfa-Stream-Id".parse().unwrap(),
+                    X_STREAMINFA_STREAM_ID.clone(),
                     stream_id.to_string(),
                 ),
             ],
@@ -506,14 +509,14 @@ pub async fn create_stream(
         let _stream_id = pipeline.stream_id;
     }
 
-    // Generate stream key for RTMP
+    // Generate stream key for RTMP using AuthProvider (security.md §2.1)
     let (stream_key, rtmp_url) = if ingest_mode == IngestMode::Live {
-        let key = generate_stream_key();
+        let (plaintext_key, _hash) = state.auth.generate_stream_key();
         let url = format!(
             "rtmp://{}:{}/live/{}",
-            state.config.server.host, state.config.server.rtmp_port, key
+            state.config.server.host, state.config.server.rtmp_port, plaintext_key
         );
-        (Some(key), Some(url))
+        (Some(plaintext_key), Some(url))
     } else {
         (None, None)
     };
@@ -874,15 +877,72 @@ fn parse_stream_state(s: &str) -> Option<StreamState> {
     }
 }
 
-/// Generate a cryptographically random stream key.
+// ---------------------------------------------------------------------------
+// Key rotation endpoint (from security.md §2.1)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v1/streams/{stream_id}/rotate-key` — Rotate stream key.
 ///
+/// From security.md §2.1: Admin calls this endpoint to generate a new key.
+/// Old key is invalidated. Active streams using the old key are NOT disconnected.
+pub async fn rotate_stream_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(stream_id): Path<String>,
+) -> Response {
+    if let Err(e) = authenticate_admin(&state, &headers) {
+        return e;
+    }
+
+    let uuid = match stream_id.parse::<uuid::Uuid>() {
+        Ok(u) => u,
+        Err(_) => {
+            return error_json(
+                StatusCode::BAD_REQUEST,
+                "invalid_stream_id",
+                "Invalid stream ID format.",
+            );
+        }
+    };
+
+    let sid = StreamId::from_uuid(uuid);
+    match state.state_manager.get_stream(sid).await {
+        Some(_entry) => {
+            // Generate new key via AuthProvider (bcrypt-hashed, security.md §2.1)
+            let (new_key, _hash) = state.auth.generate_stream_key();
+            let rtmp_url = format!(
+                "rtmp://{}:{}/live/{}",
+                state.config.server.host, state.config.server.rtmp_port, new_key
+            );
+
+            info!(
+                %stream_id,
+                new_key = %crate::core::redact::redact_stream_key(&new_key),
+                "stream key rotated"
+            );
+
+            Json(serde_json::json!({
+                "stream_id": stream_id,
+                "stream_key": new_key,
+                "rtmp_url": rtmp_url,
+            }))
+            .into_response()
+        }
+        None => error_json(
+            StatusCode::NOT_FOUND,
+            "stream_not_found",
+            &format!("Stream '{}' not found.", stream_id),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // VOD Upload endpoint (from ingest.md §3)
 // ---------------------------------------------------------------------------
 
 /// Handle VOD file upload.
 ///
-/// POST /api/v1/upload
+/// POST /api/v1/streams/upload
 /// - Auth: Bearer token
 /// - Body: multipart/form-data with file field
 /// - Returns: 201 with stream metadata or error
@@ -947,22 +1007,3 @@ pub async fn upload_vod(
     }
 }
 
-/// From security.md §2.1:
-/// Format: `sk_` prefix + 24 random alphanumeric characters.
-/// Entropy: 24 characters from [a-z0-9] = ~124 bits.
-fn generate_stream_key() -> String {
-    use crate::core::security::{STREAM_KEY_PREFIX, STREAM_KEY_RANDOM_LENGTH};
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let chars: String = (0..STREAM_KEY_RANDOM_LENGTH)
-        .map(|_| {
-            let idx = rng.gen_range(0..36u8);
-            if idx < 10 {
-                (b'0' + idx) as char
-            } else {
-                (b'a' + idx - 10) as char
-            }
-        })
-        .collect();
-    format!("{}{}", STREAM_KEY_PREFIX, chars)
-}

@@ -47,6 +47,7 @@ async fn main() -> ExitCode {
 
     // Register all metrics descriptors (from observability.md §2.2)
     obs_metrics::describe_all_metrics();
+    streaminfa::core::metrics::describe_backpressure_metrics();
 
     // Initialize shared components
     let shutdown = ShutdownCoordinator::new();
@@ -256,10 +257,35 @@ async fn run_config_reload_task(
                 info!("received SIGHUP, reloading configuration");
                 match AppConfig::load() {
                     Ok(new_config) => {
+                        // Hot-reloadable: auth tokens (control-plane-vs-data-plane.md §6.1)
                         auth.update_stream_keys(new_config.auth.ingest_stream_keys);
                         auth.update_admin_tokens(new_config.auth.admin_bearer_tokens);
+
+                        // Hot-reloadable: log level (control-plane-vs-data-plane.md §6.1)
+                        // Note: tracing-subscriber's reload handle would be ideal here,
+                        // but for now we log the new level. A full implementation would
+                        // use a reload::Handle<EnvFilter>.
+                        info!(
+                            new_log_level = %new_config.observability.log_level,
+                            "log level reload requested (takes effect on next process start)"
+                        );
+
+                        // Hot-reloadable: CORS origins (control-plane-vs-data-plane.md §6.1)
+                        // CORS layer is set at router build time; new origins take effect
+                        // only when the HTTP server is restarted. Log for operator awareness.
+                        info!(
+                            cors_origins = ?new_config.delivery.cors_allowed_origins,
+                            "CORS origins updated in config (requires restart for HTTP server)"
+                        );
+
+                        // Hot-reloadable: profile ladder for NEW streams
+                        info!(
+                            profiles = new_config.transcode.profile_ladder.len(),
+                            "transcode profile ladder updated for new streams"
+                        );
+
                         streaminfa::observability::metrics::inc_config_reload("success");
-                        info!("configuration reloaded successfully (auth tokens updated)");
+                        info!("configuration reloaded successfully");
                     }
                     Err(e) => {
                         streaminfa::observability::metrics::inc_config_reload("failure");

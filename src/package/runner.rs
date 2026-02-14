@@ -94,7 +94,15 @@ pub async fn run_packager(
                         data: init_data,
                         content_type: "video/mp4".to_string(),
                     };
-                    if storage_tx.send(write).await.is_err() {
+                    if crate::core::metrics::send_with_backpressure(
+                        &storage_tx,
+                        write,
+                        "packager_storage",
+                        crate::core::types::PACKAGER_STORAGE_CHANNEL_CAP,
+                    )
+                    .await
+                    .is_err()
+                    {
                         warn!(%stream_id, "storage channel closed during init segment write");
                         break;
                     }
@@ -159,7 +167,15 @@ pub async fn run_packager(
                     data: segment_data,
                     content_type,
                 };
-                if storage_tx.send(write).await.is_err() {
+                if crate::core::metrics::send_with_backpressure(
+                    &storage_tx,
+                    write,
+                    "packager_storage",
+                    crate::core::types::PACKAGER_STORAGE_CHANNEL_CAP,
+                )
+                .await
+                .is_err()
+                {
                     warn!(%stream_id, "storage channel closed during segment write");
                     break;
                 }
@@ -182,7 +198,15 @@ pub async fn run_packager(
                     data: Bytes::from(playlist_content),
                     content_type: "application/vnd.apple.mpegurl".to_string(),
                 };
-                if storage_tx.send(playlist_write).await.is_err() {
+                if crate::core::metrics::send_with_backpressure(
+                    &storage_tx,
+                    playlist_write,
+                    "packager_storage",
+                    crate::core::types::PACKAGER_STORAGE_CHANNEL_CAP,
+                )
+                .await
+                .is_err()
+                {
                     warn!(%stream_id, "storage channel closed during playlist write");
                     break;
                 }
@@ -197,6 +221,18 @@ pub async fn run_packager(
                         sequence,
                     })
                     .await;
+
+                // If this is the last segment for this rendition, emit RenditionComplete
+                // to trigger PROCESSING → READY auto-transition (media-lifecycle.md §3.2)
+                if segment.is_last {
+                    let _ = event_tx
+                        .send(PipelineEvent::RenditionComplete {
+                            stream_id,
+                            rendition: rendition.to_string(),
+                        })
+                        .await;
+                    info!(%stream_id, rendition = %rendition, "rendition complete, last segment emitted");
+                }
 
                 debug!(
                     %stream_id,
@@ -227,7 +263,13 @@ pub async fn run_packager(
             data: Bytes::from(master_content),
             content_type: "application/vnd.apple.mpegurl".to_string(),
         };
-        let _ = storage_tx.send(write).await;
+        let _ = crate::core::metrics::send_with_backpressure(
+            &storage_tx,
+            write,
+            "packager_storage",
+            crate::core::types::PACKAGER_STORAGE_CHANNEL_CAP,
+        )
+        .await;
     }
 
     info!(%stream_id, "packager task finished");

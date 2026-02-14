@@ -33,6 +33,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libavutil-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavfilter-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libavdevice-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -70,6 +83,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libavutil-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavfilter-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libavdevice-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -84,7 +110,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-test-
 
       - name: Run unit tests
-        run: cargo test --lib --bins --all-features
+        run: cargo test --lib --bins --all-features --features ffmpeg
 
   # --------------------------------------------------------
   # Stage 3: Build Docker Image
@@ -137,6 +163,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libavutil-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavfilter-dev \
+            libswscale-dev \
+            libswresample-dev \
+            libavdevice-dev \
+            curl
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -164,7 +204,7 @@ jobs:
           STREAMINFA_STORAGE_ACCESS_KEY_ID: "minioadmin"
           STREAMINFA_STORAGE_SECRET_ACCESS_KEY: "minioadmin"
           STREAMINFA_STORAGE_PATH_STYLE: "true"
-        run: cargo test --test '*' || echo "No integration tests found yet"
+        run: cargo test --test '*' --all-features --features ffmpeg || echo "No integration tests found yet"
 
   # --------------------------------------------------------
   # Stage 5: E2E Tests
