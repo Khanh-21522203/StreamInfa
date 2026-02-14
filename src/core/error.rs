@@ -154,7 +154,10 @@ pub enum DeliveryError {
     SegmentNotFound { path: String },
 
     #[error("rendition not found: {rendition} for stream {stream_id}")]
-    RenditionNotFound { stream_id: String, rendition: String },
+    RenditionNotFound {
+        stream_id: String,
+        rendition: String,
+    },
 
     #[error("stream not ready: {stream_id} is in state {state}")]
     StreamNotReady { stream_id: String, state: String },

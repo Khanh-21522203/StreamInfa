@@ -60,6 +60,7 @@ where
 /// A visitor that checks whether any fields in a tracing event are sensitive.
 ///
 /// Used to audit log output for accidental sensitive data exposure.
+#[derive(Default)]
 pub struct SensitiveFieldDetector {
     pub found_sensitive: bool,
     pub field_names: Vec<String>,
@@ -67,10 +68,7 @@ pub struct SensitiveFieldDetector {
 
 impl SensitiveFieldDetector {
     pub fn new() -> Self {
-        Self {
-            found_sensitive: false,
-            field_names: Vec::new(),
-        }
+        Self::default()
     }
 }
 

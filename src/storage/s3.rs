@@ -85,21 +85,25 @@ impl S3MediaStore {
                 tokio::time::sleep(backoff).await;
             }
 
-            match self
-                .client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .body(ByteStream::from(body.clone()))
-                .content_type(content_type)
-                .send()
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(e) => {
+            let result = tokio::time::timeout(
+                self.request_timeout,
+                self.client
+                    .put_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .body(ByteStream::from(body.clone()))
+                    .content_type(content_type)
+                    .send(),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(e)) => {
                     let err_str = e.to_string();
                     // Don't retry 403 (forbidden) — likely misconfigured credentials
                     if err_str.contains("403") || err_str.contains("Forbidden") {
+                        error!(key, error = %err_str, "S3 PUT forbidden — not retrying");
                         return Err(StorageError::S3PutFailed {
                             path: key.to_string(),
                             reason: format!("forbidden (credentials issue): {}", err_str),
@@ -108,9 +112,19 @@ impl S3MediaStore {
                     warn!(key, attempt, error = %err_str, "S3 PUT failed");
                     last_err = Some(err_str);
                 }
+                Err(_) => {
+                    let err_str = format!("request timed out after {:?}", self.request_timeout);
+                    warn!(key, attempt, error = %err_str, "S3 PUT timed out");
+                    last_err = Some(err_str);
+                }
             }
         }
 
+        error!(
+            key,
+            last_error = last_err.as_deref().unwrap_or("unknown"),
+            "S3 PUT retries exhausted"
+        );
         Err(StorageError::RetriesExhausted {
             path: key.to_string(),
         })
@@ -126,15 +140,18 @@ impl S3MediaStore {
                 tokio::time::sleep(backoff).await;
             }
 
-            match self
-                .client
-                .get_object()
-                .bucket(&self.bucket)
-                .key(key)
-                .send()
-                .await
-            {
-                Ok(output) => {
+            let result = tokio::time::timeout(
+                self.request_timeout,
+                self.client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .send(),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(output)) => {
                     let content_length = output.content_length.unwrap_or(0) as u64;
                     let content_type = output
                         .content_type
@@ -156,14 +173,14 @@ impl S3MediaStore {
                         .into_bytes();
 
                     return Ok(GetObjectOutput {
-                        body: Bytes::from(body_bytes),
+                        body: body_bytes,
                         _content_length: content_length,
                         content_type,
                         _last_modified: last_modified,
                         etag,
                     });
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let err_str = e.to_string();
                     // Don't retry 404 — object doesn't exist
                     if err_str.contains("NoSuchKey") || err_str.contains("404") {
@@ -173,6 +190,7 @@ impl S3MediaStore {
                         });
                     }
                     if err_str.contains("403") || err_str.contains("Forbidden") {
+                        error!(key, error = %err_str, "S3 GET forbidden — not retrying");
                         return Err(StorageError::S3GetFailed {
                             path: key.to_string(),
                             reason: format!("forbidden: {}", err_str),
@@ -181,9 +199,19 @@ impl S3MediaStore {
                     warn!(key, attempt, error = %err_str, "S3 GET failed");
                     last_err = Some(err_str);
                 }
+                Err(_) => {
+                    let err_str = format!("request timed out after {:?}", self.request_timeout);
+                    warn!(key, attempt, error = %err_str, "S3 GET timed out");
+                    last_err = Some(err_str);
+                }
             }
         }
 
+        error!(
+            key,
+            last_error = last_err.as_deref().unwrap_or("unknown"),
+            "S3 GET retries exhausted"
+        );
         Err(StorageError::RetriesExhausted {
             path: key.to_string(),
         })
@@ -252,7 +280,7 @@ impl MediaStore for S3MediaStore {
                     .into_bytes();
 
                 Ok(GetObjectOutput {
-                    body: Bytes::from(body_bytes),
+                    body: body_bytes,
                     _content_length: content_length,
                     content_type,
                     _last_modified: last_modified,
@@ -319,13 +347,17 @@ impl MediaStore for S3MediaStore {
         Ok(deleted_count)
     }
 
-    async fn put_metadata(&self, path: &str, metadata: &str) -> Result<(), StorageError> {
-        self.put_with_retry(
-            path,
-            Bytes::from(metadata.to_string()),
-            "application/json",
-        )
-        .await
+    async fn put_metadata(
+        &self,
+        path: &str,
+        metadata: &StreamMetadata,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(metadata).map_err(|e| StorageError::S3PutFailed {
+            path: path.to_string(),
+            reason: format!("failed to serialize metadata: {}", e),
+        })?;
+        self.put_with_retry(path, Bytes::from(json), "application/json")
+            .await
     }
 
     async fn head_object(&self, path: &str) -> Result<super::ObjectMeta, StorageError> {

@@ -130,6 +130,10 @@ impl SegmentIndex {
         self.segments.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
     pub fn media_sequence(&self) -> u64 {
         self.segments.front().map(|s| s.sequence).unwrap_or(0)
     }

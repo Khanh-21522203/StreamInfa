@@ -65,7 +65,9 @@ pub async fn run_storage_writer(
                 let content = String::from_utf8_lossy(&write.data).to_string();
                 store.put_manifest(&path, &content).await
             } else {
-                store.put_segment(&path, write.data.clone(), &content_type).await
+                store
+                    .put_segment(&path, write.data.clone(), &content_type)
+                    .await
             };
 
             match result {

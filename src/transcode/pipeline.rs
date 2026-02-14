@@ -45,7 +45,11 @@ impl TranscodePipeline {
         state_manager: Arc<StreamStateManager>,
         cancel: CancellationToken,
     ) -> Self {
-        Self { config, state_manager, cancel }
+        Self {
+            config,
+            state_manager,
+            cancel,
+        }
     }
 
     /// Start a live transcode pipeline for a stream.

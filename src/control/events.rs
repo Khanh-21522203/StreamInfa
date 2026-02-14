@@ -43,7 +43,10 @@ pub enum PipelineEvent {
 
     /// A rendition has finished producing all segments.
     /// Used to trigger PROCESSING → READY auto-transition when all renditions complete.
-    RenditionComplete { stream_id: StreamId, rendition: String },
+    RenditionComplete {
+        stream_id: StreamId,
+        rendition: String,
+    },
 }
 
 /// Event channel capacity (from control-plane-vs-data-plane.md §4.3).
@@ -113,14 +116,22 @@ pub async fn run_event_handler<S: MediaStore>(
 
             PipelineEvent::VodProgress { stream_id, percent } => {
                 debug!(%stream_id, percent, "VOD transcode progress");
-                crate::observability::metrics::set_vod_progress(&stream_id.to_string(), percent as f64);
+                crate::observability::metrics::set_vod_progress(
+                    &stream_id.to_string(),
+                    percent as f64,
+                );
             }
 
-            PipelineEvent::RenditionComplete { stream_id, rendition } => {
+            PipelineEvent::RenditionComplete {
+                stream_id,
+                rendition,
+            } => {
                 info!(%stream_id, %rendition, "rendition complete");
                 // mark_rendition_complete will auto-transition PROCESSING → READY
                 // when all expected renditions are done (media-lifecycle.md §3.2)
-                state_manager.mark_rendition_complete(stream_id, &rendition).await;
+                state_manager
+                    .mark_rendition_complete(stream_id, &rendition)
+                    .await;
             }
         }
     }

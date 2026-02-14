@@ -73,11 +73,17 @@ impl AuthProvider {
     /// Returns (plaintext_key, bcrypt_hash). The plaintext is returned to the
     /// caller once; only the hash is stored (security.md §2.1).
     pub fn generate_stream_key(&self) -> (String, String) {
-        let plaintext = generate_random_token(security::STREAM_KEY_PREFIX, security::STREAM_KEY_RANDOM_LENGTH);
+        let plaintext = generate_random_token(
+            security::STREAM_KEY_PREFIX,
+            security::STREAM_KEY_RANDOM_LENGTH,
+        );
         let hash = bcrypt::hash(&plaintext, BCRYPT_COST)
             .expect("bcrypt hash should not fail for valid input");
         {
-            let mut hashes = self.ingest_key_hashes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut hashes = self
+                .ingest_key_hashes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             hashes.push(hash.clone());
         }
         (plaintext, hash)
@@ -90,7 +96,10 @@ impl AuthProvider {
         let hash = bcrypt::hash(&plaintext, BCRYPT_COST)
             .expect("bcrypt hash should not fail for valid input");
         {
-            let mut hashes = self.admin_token_hashes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut hashes = self
+                .admin_token_hashes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             hashes.push(hash.clone());
         }
         (plaintext, hash)
@@ -100,7 +109,10 @@ impl AuthProvider {
     /// and returns a new (plaintext, hash) pair (security.md §2.1).
     pub fn rotate_stream_key(&self, old_hash: &str) -> (String, String) {
         {
-            let mut hashes = self.ingest_key_hashes.lock().unwrap_or_else(|e| e.into_inner());
+            let mut hashes = self
+                .ingest_key_hashes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             hashes.retain(|h| h != old_hash);
         }
         self.generate_stream_key()
@@ -111,12 +123,18 @@ impl AuthProvider {
     /// If no keys are configured, all keys are accepted (open mode).
     /// Uses bcrypt_verify which is inherently constant-time (security.md §2.1).
     pub fn validate_stream_key(&self, stream_key: &str) -> Result<(), IngestError> {
-        let hashes = self.ingest_key_hashes.lock().unwrap_or_else(|e| e.into_inner());
+        let hashes = self
+            .ingest_key_hashes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if hashes.is_empty() {
             return Ok(());
         }
 
-        if hashes.iter().any(|h| bcrypt::verify(stream_key, h).unwrap_or(false)) {
+        if hashes
+            .iter()
+            .any(|h| bcrypt::verify(stream_key, h).unwrap_or(false))
+        {
             Ok(())
         } else {
             Err(IngestError::AuthFailed {
@@ -160,7 +178,10 @@ impl AuthProvider {
 
     /// Check if an IP is currently blocked.
     fn is_ip_blocked(&self, ip: IpAddr) -> bool {
-        let tracker = self.brute_force_tracker.lock().unwrap_or_else(|e| e.into_inner());
+        let tracker = self
+            .brute_force_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = tracker.get(&ip) {
             if let Some(blocked_until) = entry.blocked_until {
                 return Instant::now() < blocked_until;
@@ -171,7 +192,10 @@ impl AuthProvider {
 
     /// Record a failed auth attempt from an IP.
     fn record_failed_attempt(&self, ip: IpAddr) {
-        let mut tracker = self.brute_force_tracker.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tracker = self
+            .brute_force_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let entry = tracker.entry(ip).or_insert(BruteForceEntry {
             attempts: 0,
@@ -198,7 +222,10 @@ impl AuthProvider {
 
     /// Reset failed attempts for an IP (on successful auth).
     fn reset_ip_attempts(&self, ip: IpAddr) {
-        let mut tracker = self.brute_force_tracker.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tracker = self
+            .brute_force_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         tracker.remove(&ip);
     }
 
@@ -207,12 +234,17 @@ impl AuthProvider {
     /// If no tokens are configured, all requests are accepted (open mode).
     /// Uses bcrypt_verify which is inherently constant-time (security.md §2.2).
     pub fn validate_bearer_token(&self, token: &str) -> bool {
-        let hashes = self.admin_token_hashes.lock().unwrap_or_else(|e| e.into_inner());
+        let hashes = self
+            .admin_token_hashes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if hashes.is_empty() {
             return true;
         }
 
-        hashes.iter().any(|h| bcrypt::verify(token, h).unwrap_or(false))
+        hashes
+            .iter()
+            .any(|h| bcrypt::verify(token, h).unwrap_or(false))
     }
 
     /// Check a bearer token from an Authorization header.
@@ -242,7 +274,10 @@ impl AuthProvider {
             .iter()
             .filter_map(|k| bcrypt::hash(k, BCRYPT_COST).ok())
             .collect();
-        let mut current = self.ingest_key_hashes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current = self
+            .ingest_key_hashes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *current = hashes;
     }
 
@@ -253,7 +288,10 @@ impl AuthProvider {
             .iter()
             .filter_map(|t| bcrypt::hash(t, BCRYPT_COST).ok())
             .collect();
-        let mut current = self.admin_token_hashes.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current = self
+            .admin_token_hashes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *current = hashes;
     }
 
@@ -265,7 +303,10 @@ impl AuthProvider {
     /// Clean up expired brute-force tracker entries.
     /// Called periodically by the cleanup task.
     pub fn cleanup_brute_force_tracker(&self) {
-        let mut tracker = self.brute_force_tracker.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tracker = self
+            .brute_force_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         tracker.retain(|_ip, entry| {
             // Keep entries that are still blocked or have recent attempts

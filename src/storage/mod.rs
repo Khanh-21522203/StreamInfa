@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::error::StorageError;
+use crate::core::types::StreamMetadata;
 
 // ---------------------------------------------------------------------------
 // MediaStore trait (from storage-and-delivery.md §4)
@@ -72,7 +73,7 @@ pub trait MediaStore: Send + Sync {
     fn put_metadata(
         &self,
         path: &str,
-        metadata: &str,
+        metadata: &StreamMetadata,
     ) -> impl std::future::Future<Output = Result<(), StorageError>> + Send;
 
     /// HEAD an object to get metadata without downloading the body (storage-and-delivery.md §4).

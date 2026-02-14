@@ -232,6 +232,7 @@ async fn graceful_shutdown() {
 /// On SIGHUP:
 /// 1. Reload config from disk
 /// 2. Update auth tokens (admin bearer tokens + stream keys)
+///
 /// This enables zero-downtime token rotation.
 async fn run_config_reload_task(
     auth: Arc<streaminfa::core::auth::AuthProvider>,

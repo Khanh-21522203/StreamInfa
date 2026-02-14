@@ -12,6 +12,7 @@ use tracing::info;
 /// 5. Flush remaining segments to storage (timeout: 5s)
 /// 6. Close HTTP server (drain in-flight requests, timeout: 5s)
 /// 7. Exit with code 0
+///
 /// Total shutdown timeout: 30 seconds. After 30s, force exit with code 1.
 #[derive(Clone)]
 pub struct ShutdownCoordinator {

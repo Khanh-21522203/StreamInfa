@@ -192,7 +192,7 @@ impl HttpUploadHandler {
 
         let container = if header.len() >= 12 && &header[4..8] == b"ftyp" {
             Container::Mp4
-        } else if header.len() >= 4 && &header[0..4] == &[0x1A, 0x45, 0xDF, 0xA3] {
+        } else if header.len() >= 4 && header[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
             Container::Mkv
         } else {
             return Err(IngestError::UnsupportedFormat {

@@ -99,7 +99,7 @@ impl FlvDemuxer {
     ///
     /// Returns `Ok(Some(frame))` for media frames, `Ok(None)` for sequence
     /// headers and non-frame data, or `Err` for invalid data.
-    pub fn demux_flv_tag(
+    pub(crate) fn demux_flv_tag(
         &mut self,
         msg: &RtmpMessage,
     ) -> Result<Option<DemuxedFrame>, IngestError> {

@@ -268,10 +268,7 @@ fn build_response(
                 (header::CACHE_CONTROL, cache_control.to_string()),
                 (header::ETAG, etag.to_string()),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
-                (
-                    X_STREAMINFA_STREAM_ID.clone(),
-                    stream_id.to_string(),
-                ),
+                (X_STREAMINFA_STREAM_ID.clone(), stream_id.to_string()),
             ],
             slice,
         )
@@ -285,10 +282,7 @@ fn build_response(
                 (header::CACHE_CONTROL, cache_control.to_string()),
                 (header::ETAG, etag.to_string()),
                 (header::ACCEPT_RANGES, "bytes".to_string()),
-                (
-                    X_STREAMINFA_STREAM_ID.clone(),
-                    stream_id.to_string(),
-                ),
+                (X_STREAMINFA_STREAM_ID.clone(), stream_id.to_string()),
             ],
             data,
         )
@@ -826,6 +820,7 @@ pub async fn readyz(State(state): State<AppState>) -> Response {
 /// - Token format invalid → 401 Unauthorized  
 /// - Token not in valid set → 403 Forbidden
 /// - Token valid → proceed
+#[allow(clippy::result_large_err)]
 fn authenticate_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
     let token = headers
         .get(header::AUTHORIZATION)
@@ -1006,4 +1001,3 @@ pub async fn upload_vod(
         }
     }
 }
-

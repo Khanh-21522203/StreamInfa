@@ -6,6 +6,7 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 
 use crate::core::error::StorageError;
+use crate::core::types::StreamMetadata;
 
 use super::{GetObjectOutput, MediaStore, ObjectInfo};
 
@@ -162,12 +163,20 @@ impl MediaStore for InMemoryMediaStore {
         Ok(result)
     }
 
-    async fn put_metadata(&self, path: &str, metadata: &str) -> Result<(), StorageError> {
+    async fn put_metadata(
+        &self,
+        path: &str,
+        metadata: &StreamMetadata,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(metadata).map_err(|e| StorageError::S3PutFailed {
+            path: path.to_string(),
+            reason: format!("failed to serialize metadata: {}", e),
+        })?;
         let mut objects = self.objects.write().await;
         objects.insert(
             path.to_string(),
             StoredObject {
-                data: Bytes::from(metadata.to_string()),
+                data: Bytes::from(json),
                 content_type: "application/json".to_string(),
                 created_at: Utc::now(),
             },

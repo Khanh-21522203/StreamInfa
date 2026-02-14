@@ -233,14 +233,15 @@ impl StreamStateManager {
         sequence: u64,
     ) {
         if let Some(mut entry) = self.streams.get_mut(&stream_id) {
-            let status = entry.renditions.entry(rendition.to_string()).or_insert_with(|| {
-                RenditionStatus {
+            let status = entry
+                .renditions
+                .entry(rendition.to_string())
+                .or_insert_with(|| RenditionStatus {
                     rendition: rendition.to_string(),
                     segments_produced: 0,
                     last_segment_time: None,
                     status: RenditionState::Active,
-                }
-            });
+                });
             status.segments_produced = sequence;
             status.last_segment_time = Some(chrono::Utc::now());
             debug!(%stream_id, %rendition, sequence, "rendition progress updated");
@@ -261,7 +262,9 @@ impl StreamStateManager {
             }
             // Check if all expected renditions are complete
             if let Some(expected) = entry.expected_renditions {
-                let complete_count = entry.renditions.values()
+                let complete_count = entry
+                    .renditions
+                    .values()
                     .filter(|r| r.status == RenditionState::Complete)
                     .count();
                 entry.state == StreamState::Processing && complete_count >= expected

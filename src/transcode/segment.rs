@@ -69,6 +69,7 @@ pub struct SegmentAccumulator {
 }
 
 impl SegmentAccumulator {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream_id: StreamId,
         rendition: RenditionId,
