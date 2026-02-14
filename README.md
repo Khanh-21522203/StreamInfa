@@ -62,32 +62,38 @@ A backend media infrastructure platform built in Rust for live and VOD video str
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     Control Plane                        │
-│  REST API (Axum) ←→ StreamStateManager (DashMap)        │
-│  POST/GET/DELETE /api/v1/streams                        │
-└──────────────┬──────────────────────────────────────────┘
-               │ PipelineEvent (mpsc)
-┌──────────────▼──────────────────────────────────────────┐
-│                      Data Plane                          │
-│                                                          │
-│  ┌─────────┐    ┌───────────┐    ┌─────────┐    ┌─────┐│
-│  │ Ingest  │───→│ Transcode │───→│ Package │───→│Store ││
-│  │ (RTMP/  │    │ (H.264    │    │ (HLS    │    │(S3/ ││
-│  │  HTTP)  │    │  ladder)  │    │  fMP4)  │    │Mem) ││
-│  └─────────┘    └───────────┘    └─────────┘    └─────┘│
-│       ↕              ↕               ↕             ↕    │
-│    bounded        bounded         bounded       bounded │
-│    mpsc ch.       mpsc ch.        mpsc ch.      mpsc ch.│
-└─────────────────────────────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────────────┐
-│                    Delivery (HTTP)                        │
-│  GET /streams/{id}/master.m3u8                           │
-│  GET /streams/{id}/{rendition}/media.m3u8                │
-│  GET /streams/{id}/{rendition}/init.mp4                  │
-│  GET /streams/{id}/{rendition}/{segment}.m4s             │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                          StreamInfa Binary                                   │
+│                                                                              │
+│  ┌─────────────┐    ┌──────────────┐    ┌────────────┐    ┌──────────────┐  │
+│  │   Ingest    │    │  Transcode   │    │  Packager  │    │   Storage    │  │
+│  │   Service   │───►│  Pipeline    │───►│   (HLS)    │───►│   Client     │  │
+│  │             │    │              │    │            │    │  (S3/MinIO)  │  │
+│  │  ┌────────┐ │    │  ┌─────────┐ │    │            │    │              │  │
+│  │  │ RTMP   │ │    │  │ FFmpeg  │ │    │            │    │              │  │
+│  │  │ Server │ │    │  │  FFI    │ │    │            │    │              │  │
+│  │  ├────────┤ │    │  └─────────┘ │    │            │    │              │  │
+│  │  │ HTTP   │ │    │              │    │            │    │              │  │
+│  │  │ Upload │ │    │              │    │            │    │              │  │
+│  │  └────────┘ │    │              │    │            │    │              │  │
+│  └─────────────┘    └──────────────┘    └────────────┘    └──────┬───────┘  │
+│         │                                                        │          │
+│         │              ┌──────────────┐                          │          │
+│         │              │   Control    │                          │          │
+│         └─────────────►│    Plane     │◄─────────────────────────┘          │
+│                        │   (REST)     │                                     │
+│                        └──────────────┘                                     │
+│                               │                                             │
+│                        ┌──────┴───────┐                                     │
+│                        │   Delivery   │                                     │
+│                        │   (Origin)   │──────────────────────────────► CDN  │
+│                        └──────────────┘                                     │
+│                                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                        Common / Core                                 │   │
+│  │   config │ error │ metrics │ tracing │ types │ health │ auth         │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Module Structure
@@ -433,16 +439,3 @@ Example output:
 [stress::storage_write_throughput] 1000 segments written in 12.3ms (81,300 segments/sec, 1.23μs/op)
 [stress::state_manager_contention] 50 writers + 200 readers completed in 45.2ms (0 conflicts)
 ```
-
-## Performance Targets
-
-| Metric | Target |
-|--------|--------|
-| Max concurrent live streams | 5 |
-| Glass-to-glass latency | ≤ 18 seconds |
-| Uptime | 99.5% |
-| Segment duration | 6 seconds |
-
-## License
-
-MIT

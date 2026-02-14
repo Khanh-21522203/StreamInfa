@@ -216,7 +216,7 @@ jobs:
 
       - name: Start full stack
         run: |
-          docker-compose -f docker/docker-compose.yml up -d minio minio-setup prometheus
+          docker compose -f docker/docker-compose.yml up -d minio minio-setup prometheus
           sleep 10
 
       - name: Run E2E tests
@@ -226,7 +226,7 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: docker-compose -f docker/docker-compose.yml down -v
+        run: docker compose -f docker/docker-compose.yml down -v
 
   # --------------------------------------------------------
   # Stage 6: Push Release Image
