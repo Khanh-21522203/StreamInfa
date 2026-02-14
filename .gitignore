@@ -7,7 +7,6 @@
 
 # Rust
 /target/
-Cargo.lock
 **/*.rs.bk
 
 # OS

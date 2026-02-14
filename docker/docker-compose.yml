@@ -35,6 +35,7 @@ services:
       - STREAMINFA_AUTH_ADMIN_BEARER_TOKENS=at_dev_token_for_local_testing_only
     volumes:
       - upload-tmp:/tmp/streaminfa/uploads
+      - ../config:/app/config
     depends_on:
       minio-setup:
         condition: service_completed_successfully
