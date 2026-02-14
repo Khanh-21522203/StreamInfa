@@ -147,20 +147,6 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: unit-tests
-    services:
-      minio:
-        image: minio/minio:RELEASE.2024-06-13T22-53-53Z
-        ports:
-          - 9000:9000
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 3
-        command: server /data --console-address ":9001"
     steps:
       - uses: actions/checkout@v4
 
@@ -191,12 +177,21 @@ jobs:
           key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-integration-
 
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 -p 9001:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2024-06-13T22-53-53Z server /data --console-address ":9001"
+          sleep 10
+
       - name: Create MinIO bucket
         run: |
-          curl -sS https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
-          mc alias set local http://localhost:9000 minioadmin minioadmin
-          mc mb local/streaminfa-media --ignore-existing
+          docker run --rm --network host minio/mc \
+            alias set local http://localhost:9000 minioadmin minioadmin || true
+          docker run --rm --network host minio/mc \
+            mb local/streaminfa-media --ignore-existing || true
 
       - name: Run integration tests
         env:
