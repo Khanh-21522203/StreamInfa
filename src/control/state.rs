@@ -134,7 +134,7 @@ impl StreamStateManager {
             StreamState::Live => {
                 entry_ref.metadata.started_at = Some(chrono::Utc::now());
             }
-            StreamState::Ready | StreamState::Error => {
+            StreamState::Ready | StreamState::Error | StreamState::Deleted => {
                 entry_ref.metadata.ended_at = Some(chrono::Utc::now());
             }
             _ => {}
@@ -189,8 +189,10 @@ impl StreamStateManager {
         entry_ref.metadata.ended_at = Some(chrono::Utc::now());
         entry_ref.state = StreamState::Error;
         entry_ref.error_message = Some(error_message);
-
-        Ok(entry_ref.clone())
+        let updated = entry_ref.clone();
+        drop(entry_ref);
+        self.update_stream_gauges();
+        Ok(updated)
     }
 
     /// Get the current state of a stream.
@@ -291,7 +293,11 @@ impl StreamStateManager {
 
     /// Remove a stream record entirely (for audit cleanup after retention).
     pub async fn remove_stream(&self, stream_id: StreamId) -> bool {
-        self.streams.remove(&stream_id).is_some()
+        let removed = self.streams.remove(&stream_id).is_some();
+        if removed {
+            self.update_stream_gauges();
+        }
+        removed
     }
 
     /// Update Prometheus stream count gauges per state.

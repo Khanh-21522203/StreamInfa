@@ -19,6 +19,8 @@ const CLEANUP_INTERVAL_SECS: u64 = 300;
 
 /// Age threshold for ERROR state streams before deletion (24 hours).
 const ERROR_STATE_MAX_AGE_HOURS: i64 = 24;
+/// Retention for DELETED state records before dropping in-memory tombstones.
+const DELETED_STATE_RETENTION_HOURS: i64 = 24;
 
 /// Background cleanup task that manages segment lifecycle.
 ///
@@ -27,6 +29,7 @@ const ERROR_STATE_MAX_AGE_HOURS: i64 = 24;
 ///    that are NOT referenced in the current manifest.
 /// 2. For ERROR streams older than 24 hours: deletes all S3 objects and
 ///    transitions state to DELETED.
+/// 3. For DELETED streams older than 24 hours: removes in-memory tombstones.
 pub async fn run_cleanup_task<S: MediaStore>(
     store: Arc<S>,
     state_manager: Arc<StreamStateManager>,
@@ -131,6 +134,20 @@ async fn run_cleanup_cycle<S: MediaStore>(
                 Err(e) => {
                     error!(%stream_id, error = %e, "failed to delete ERROR stream objects");
                 }
+            }
+        }
+    }
+
+    // Phase 3: Remove DELETED tombstones after retention window
+    let deleted_streams = state_manager.list_streams(Some(StreamState::Deleted)).await;
+    for stream in &deleted_streams {
+        let stream_id = stream.metadata.stream_id;
+        let deleted_at = stream.metadata.ended_at.unwrap_or(stream.metadata.created_at);
+        let age_hours = now.signed_duration_since(deleted_at).num_hours();
+
+        if age_hours >= DELETED_STATE_RETENTION_HOURS {
+            if state_manager.remove_stream(stream_id).await {
+                info!(%stream_id, age_hours, "removed DELETED stream tombstone after retention");
             }
         }
     }

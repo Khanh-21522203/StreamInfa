@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use toml::Value;
 
 /// Top-level application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +153,7 @@ impl AppConfig {
         let default_content = std::fs::read_to_string(default_path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {}", default_path.display(), e))?;
 
-        let mut config: AppConfig = toml::from_str(&default_content)
+        let mut merged: Value = toml::from_str(&default_content)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", default_path.display(), e))?;
 
         // Layer 2: environment-specific overrides
@@ -160,10 +161,14 @@ impl AppConfig {
             std::env::var("STREAMINFA_ENV").unwrap_or_else(|_| "development".to_string());
         let env_path = format!("config/{}.toml", env_name);
         if let Ok(env_content) = std::fs::read_to_string(&env_path) {
-            let env_config: AppConfig = toml::from_str(&env_content)
+            let env_config: Value = toml::from_str(&env_content)
                 .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", env_path, e))?;
-            config = env_config;
+            merge_toml_values(&mut merged, env_config);
         }
+
+        let mut config: AppConfig = merged
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("failed to deserialize merged config: {}", e))?;
 
         // Layer 3: environment variable overrides (selected keys)
         Self::apply_env_overrides(&mut config);
@@ -208,6 +213,24 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var("STREAMINFA_OBSERVABILITY_LOG_LEVEL") {
             config.observability.log_level = v;
+        }
+    }
+}
+
+fn merge_toml_values(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Table(base_table), Value::Table(overlay_table)) => {
+            for (key, overlay_value) in overlay_table {
+                match base_table.get_mut(&key) {
+                    Some(base_value) => merge_toml_values(base_value, overlay_value),
+                    None => {
+                        base_table.insert(key, overlay_value);
+                    }
+                }
+            }
+        }
+        (base_slot, overlay_value) => {
+            *base_slot = overlay_value;
         }
     }
 }

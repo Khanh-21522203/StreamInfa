@@ -39,17 +39,29 @@ impl ShutdownCoordinator {
 
     /// Wait for a shutdown signal (SIGTERM or SIGINT) and trigger coordinated shutdown.
     pub async fn wait_for_signal_and_shutdown(&self) {
-        let ctrl_c = tokio::signal::ctrl_c();
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
+        #[cfg(unix)]
+        {
+            let ctrl_c = tokio::signal::ctrl_c();
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
 
-        tokio::select! {
-            _ = ctrl_c => {
-                info!("received SIGINT (Ctrl+C)");
+            tokio::select! {
+                _ = ctrl_c => {
+                    info!("received SIGINT (Ctrl+C)");
+                }
+                _ = sigterm.recv() => {
+                    info!("received SIGTERM");
+                }
             }
-            _ = sigterm.recv() => {
-                info!("received SIGTERM");
-            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("failed to install CTRL+C handler");
+            info!("received CTRL+C");
         }
 
         self.trigger_shutdown();

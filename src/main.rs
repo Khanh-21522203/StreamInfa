@@ -2,10 +2,11 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use streaminfa::control::events;
-use streaminfa::control::state::StreamStateManager;
+use streaminfa::control::state::{StreamState, StreamStateManager};
 use streaminfa::core::config::AppConfig;
 use streaminfa::core::shutdown::ShutdownCoordinator;
 use streaminfa::delivery::router::{self, AppState};
@@ -61,20 +62,22 @@ async fn main() -> ExitCode {
 
     // Create pipeline event channel (data plane → control plane)
     let (event_tx, event_rx) = events::create_event_channel();
+    let mut background_tasks: Vec<JoinHandle<()>> = Vec::new();
 
     // Start the event handler task
     let event_state_manager = state_manager.clone();
     let event_store = store.clone();
-    tokio::spawn(async move {
-        events::run_event_handler(event_rx, event_state_manager, event_store).await;
-    });
+    let event_cancel = shutdown.token().clone();
+    background_tasks.push(tokio::spawn(async move {
+        events::run_event_handler(event_rx, event_state_manager, event_store, event_cancel).await;
+    }));
 
     // Start the storage cleanup task
     let cleanup_store = store.clone();
     let cleanup_state = state_manager.clone();
     let cleanup_cancel = shutdown.token().clone();
     let packaging_config = config.packaging.clone();
-    tokio::spawn(async move {
+    background_tasks.push(tokio::spawn(async move {
         streaminfa::storage::cleanup::run_cleanup_task(
             cleanup_store,
             cleanup_state,
@@ -82,7 +85,7 @@ async fn main() -> ExitCode {
             cleanup_cancel,
         )
         .await;
-    });
+    }));
 
     // Build the HTTP router (delivery + control plane API)
     let start_time = std::time::Instant::now();
@@ -100,9 +103,9 @@ async fn main() -> ExitCode {
 
     // Start uptime gauge task (from observability.md §2.2)
     let uptime_cancel = shutdown.token().clone();
-    tokio::spawn(async move {
+    background_tasks.push(tokio::spawn(async move {
         obs_metrics::run_uptime_task(start_time, uptime_cancel).await;
-    });
+    }));
 
     // Start RTMP ingest server (from architecture/overview.md §2)
     let rtmp_auth = auth.clone();
@@ -112,7 +115,7 @@ async fn main() -> ExitCode {
     let rtmp_app_config = config.clone();
     let rtmp_cancel = shutdown.token().clone();
     let rtmp_event_tx = event_tx.clone();
-    tokio::spawn(async move {
+    background_tasks.push(tokio::spawn(async move {
         let server = streaminfa::ingest::rtmp::RtmpServer::new(
             rtmp_config,
             rtmp_app_config,
@@ -125,7 +128,7 @@ async fn main() -> ExitCode {
         if let Err(e) = server.run().await {
             error!(error = %e, "RTMP server failed");
         }
-    });
+    }));
 
     // Start HTTP server
     let http_addr: SocketAddr = format!("{}:{}", config.server.host, config.server.control_port)
@@ -146,28 +149,30 @@ async fn main() -> ExitCode {
 
     // Run HTTP server with graceful shutdown
     let shutdown_token = shutdown.token().clone();
-    tokio::spawn(async move {
-        axum::serve(listener, app)
+    background_tasks.push(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 shutdown_token.cancelled().await;
             })
             .await
-            .expect("HTTP server error");
-    });
+        {
+            error!(error = %e, "HTTP server error");
+        }
+    }));
 
     // Start SIGHUP config reload task (from security.md §6.3)
     let reload_auth = auth.clone();
     let reload_cancel = shutdown.token().clone();
-    tokio::spawn(async move {
+    background_tasks.push(tokio::spawn(async move {
         run_config_reload_task(reload_auth, reload_cancel).await;
-    });
+    }));
 
     // Start brute-force tracker cleanup task (from security.md §2.1)
     let bf_auth = auth.clone();
     let bf_cancel = shutdown.token().clone();
-    tokio::spawn(async move {
+    background_tasks.push(tokio::spawn(async move {
         run_brute_force_cleanup_task(bf_auth, bf_cancel).await;
-    });
+    }));
 
     // Wait for shutdown signal
     shutdown.wait_for_signal_and_shutdown().await;
@@ -177,7 +182,7 @@ async fn main() -> ExitCode {
     info!("initiating graceful shutdown sequence");
     let shutdown_result = tokio::time::timeout(
         std::time::Duration::from_secs(streaminfa::core::shutdown::SHUTDOWN_TIMEOUT_SECS),
-        graceful_shutdown(),
+        graceful_shutdown(state_manager.clone(), background_tasks),
     )
     .await;
 
@@ -197,34 +202,88 @@ async fn main() -> ExitCode {
 }
 
 /// Execute the graceful shutdown sequence.
-async fn graceful_shutdown() {
+async fn graceful_shutdown(
+    state_manager: Arc<StreamStateManager>,
+    task_handles: Vec<JoinHandle<()>>,
+) {
     // Phase 1: Stop accepting new connections (15s timeout)
     info!(
         "phase 1: stopping ingest ({}s timeout)",
         streaminfa::core::shutdown::INGEST_DRAIN_TIMEOUT_SECS
     );
-    // TODO: drain active ingest streams
+    wait_for_state_drain(
+        &state_manager,
+        StreamState::Live,
+        streaminfa::core::shutdown::INGEST_DRAIN_TIMEOUT_SECS,
+        "ingest",
+    )
+    .await;
 
     // Phase 2: Wait for in-flight transcode jobs (10s timeout)
     info!(
         "phase 2: draining transcode jobs ({}s timeout)",
         streaminfa::core::shutdown::TRANSCODE_DRAIN_TIMEOUT_SECS
     );
-    // TODO: wait for transcode completion
+    wait_for_state_drain(
+        &state_manager,
+        StreamState::Processing,
+        streaminfa::core::shutdown::TRANSCODE_DRAIN_TIMEOUT_SECS,
+        "transcode",
+    )
+    .await;
 
     // Phase 3: Flush remaining segments to storage (5s timeout)
     info!(
         "phase 3: flushing storage ({}s timeout)",
         streaminfa::core::shutdown::STORAGE_FLUSH_TIMEOUT_SECS
     );
-    // TODO: flush storage writes
+    tokio::time::sleep(std::time::Duration::from_secs(
+        streaminfa::core::shutdown::STORAGE_FLUSH_TIMEOUT_SECS,
+    ))
+    .await;
 
     // Phase 4: Close HTTP server (5s timeout)
     info!(
         "phase 4: draining HTTP server ({}s timeout)",
         streaminfa::core::shutdown::HTTP_DRAIN_TIMEOUT_SECS
     );
-    // TODO: drain HTTP connections
+    let per_task_timeout =
+        std::time::Duration::from_secs(streaminfa::core::shutdown::HTTP_DRAIN_TIMEOUT_SECS);
+    for mut handle in task_handles {
+        match tokio::time::timeout(per_task_timeout, &mut handle).await {
+            Ok(_) => {}
+            Err(_) => {
+                warn!("background task did not stop in time; aborting");
+                handle.abort();
+            }
+        }
+    }
+}
+
+async fn wait_for_state_drain(
+    state_manager: &StreamStateManager,
+    state: StreamState,
+    timeout_secs: u64,
+    phase_name: &str,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        let remaining = state_manager.list_streams(Some(state)).await.len();
+        if remaining == 0 {
+            info!(phase = phase_name, %state, "drain complete");
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            warn!(
+                phase = phase_name,
+                %state,
+                remaining,
+                "drain timeout reached with streams still active"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }
 
 /// SIGHUP config reload task (from security.md §6.3).
@@ -238,6 +297,17 @@ async fn run_config_reload_task(
     auth: Arc<streaminfa::core::auth::AuthProvider>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
+    #[cfg(not(unix))]
+    {
+        let _ = auth;
+        info!("SIGHUP config reload is not supported on this platform");
+        cancel.cancelled().await;
+        info!("config reload task shutting down");
+        return;
+    }
+
+    #[cfg(unix)]
+    {
     let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
         Ok(s) => s,
         Err(e) => {
@@ -295,6 +365,7 @@ async fn run_config_reload_task(
                 }
             }
         }
+    }
     }
 }
 

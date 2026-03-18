@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::control::events::PipelineEvent;
-use crate::control::state::{StreamState, StreamStateManager};
+use crate::control::state::StreamStateManager;
 use crate::core::auth::AuthProvider;
 use crate::core::config::{AppConfig, IngestConfig};
 use crate::core::error::IngestError;
@@ -265,13 +265,6 @@ impl RtmpConnection {
         self.state_manager
             .create_stream(stream_id, crate::core::types::IngestMode::Live)
             .await;
-        self.state_manager
-            .transition(stream_id, StreamState::Live)
-            .await
-            .map_err(|e| IngestError::ValidationFailed {
-                reason: e.to_string(),
-            })?;
-
         // Validate RTMP codecs after sequence header (from ingest.md §3.4)
         // In a full implementation, this would be called after receiving the AVC sequence header.
         // For now, we validate the default expected codecs.
@@ -404,10 +397,6 @@ impl RtmpConnection {
                     .event_tx
                     .send(PipelineEvent::StreamEnded { stream_id })
                     .await;
-                let _ = self
-                    .state_manager
-                    .transition(stream_id, StreamState::Processing)
-                    .await;
             }
             Err(e) => {
                 warn!(%stream_id, error = %e, "stream ended with error");
@@ -417,10 +406,6 @@ impl RtmpConnection {
                         stream_id,
                         error: e.to_string(),
                     })
-                    .await;
-                let _ = self
-                    .state_manager
-                    .transition_to_error(stream_id, e.to_string())
                     .await;
             }
         }

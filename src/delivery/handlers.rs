@@ -17,6 +17,9 @@ use crate::storage::MediaStore;
 
 use super::router::AppState;
 
+const READYZ_MIN_DISK_BYTES: u64 = 10 * 1024 * 1024 * 1024; // 10 GiB
+const READYZ_DISK_PATH: &str = "/tmp/streaminfa/uploads";
+
 // ---------------------------------------------------------------------------
 // Error response (from storage-and-delivery.md §6.5)
 // ---------------------------------------------------------------------------
@@ -663,7 +666,7 @@ pub async fn delete_stream(
 
     let sid = StreamId::from_uuid(uuid);
     match state.state_manager.get_stream(sid).await {
-        Some(_entry) => {
+        Some(entry) => {
             // Delete S3 objects
             let prefix = format!("{}/", stream_id);
             let (segments_deleted, _storage_freed) = match state.store.delete_prefix(&prefix).await
@@ -675,12 +678,13 @@ pub async fn delete_stream(
                 }
             };
 
-            // Transition to DELETED and remove from state
-            let _ = state
-                .state_manager
-                .transition(sid, StreamState::Deleted)
-                .await;
-            state.state_manager.remove_stream(sid).await;
+            // Keep tombstone in DELETED for retention/audit cleanup.
+            if entry.state != StreamState::Deleted {
+                let _ = state
+                    .state_manager
+                    .transition(sid, StreamState::Deleted)
+                    .await;
+            }
             for _ in 0..segments_deleted {
                 obs::inc_storage_segments_deleted();
             }
@@ -743,20 +747,31 @@ pub async fn readyz(State(state): State<AppState>) -> Response {
     let mut checks = serde_json::Map::new();
     let mut all_ok = true;
 
-    // Storage check: try to HEAD the bucket by listing with empty prefix
+    // Storage check: probe and record latency
+    let storage_start = std::time::Instant::now();
     match state
         .store
         .list_objects("__health_check_nonexistent__")
         .await
     {
         Ok(_) => {
-            checks.insert("storage".to_string(), serde_json::json!({"status": "ok"}));
+            checks.insert(
+                "storage".to_string(),
+                serde_json::json!({
+                    "status": "ok",
+                    "latency_ms": storage_start.elapsed().as_millis(),
+                }),
+            );
         }
         Err(e) => {
             all_ok = false;
             checks.insert(
                 "storage".to_string(),
-                serde_json::json!({"status": "error", "error": e.to_string()}),
+                serde_json::json!({
+                    "status": "error",
+                    "latency_ms": storage_start.elapsed().as_millis(),
+                    "error": e.to_string()
+                }),
             );
         }
     }
@@ -788,6 +803,73 @@ pub async fn readyz(State(state): State<AppState>) -> Response {
         }
     }
 
+    // RTMP listener check (control-plane-vs-data-plane.md §3.2)
+    match check_rtmp_listener(&state.config.server.host, state.config.server.rtmp_port).await {
+        Ok(address) => {
+            checks.insert(
+                "rtmp_listener".to_string(),
+                serde_json::json!({
+                    "status": "ok",
+                    "port": state.config.server.rtmp_port,
+                    "address": address,
+                }),
+            );
+        }
+        Err(e) => {
+            all_ok = false;
+            checks.insert(
+                "rtmp_listener".to_string(),
+                serde_json::json!({
+                    "status": "error",
+                    "port": state.config.server.rtmp_port,
+                    "error": e,
+                }),
+            );
+        }
+    }
+
+    // Disk-space threshold check for upload temp directory
+    match check_disk_space(READYZ_DISK_PATH, READYZ_MIN_DISK_BYTES).await {
+        Ok(available_bytes) => {
+            let available_gib = available_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let required_gib = READYZ_MIN_DISK_BYTES as f64 / (1024.0 * 1024.0 * 1024.0);
+            if available_bytes >= READYZ_MIN_DISK_BYTES {
+                checks.insert(
+                    "disk_space".to_string(),
+                    serde_json::json!({
+                        "status": "ok",
+                        "path": READYZ_DISK_PATH,
+                        "available_gb": available_gib,
+                        "min_required_gb": required_gib,
+                    }),
+                );
+            } else {
+                all_ok = false;
+                checks.insert(
+                    "disk_space".to_string(),
+                    serde_json::json!({
+                        "status": "error",
+                        "path": READYZ_DISK_PATH,
+                        "available_gb": available_gib,
+                        "min_required_gb": required_gib,
+                        "error": "insufficient disk space",
+                    }),
+                );
+            }
+        }
+        Err(e) => {
+            all_ok = false;
+            checks.insert(
+                "disk_space".to_string(),
+                serde_json::json!({
+                    "status": "error",
+                    "path": READYZ_DISK_PATH,
+                    "error": e,
+                }),
+            );
+        }
+    }
+
     let status = if all_ok { "ready" } else { "not_ready" };
     let http_status = if all_ok {
         StatusCode::OK
@@ -807,6 +889,63 @@ pub async fn readyz(State(state): State<AppState>) -> Response {
         })),
     )
         .into_response()
+}
+
+async fn check_rtmp_listener(host: &str, port: u16) -> Result<String, String> {
+    let probe_host = match host {
+        "0.0.0.0" => "127.0.0.1",
+        "::" => "::1",
+        _ => host,
+    };
+    let address = format!("{probe_host}:{port}");
+
+    let connect_result = tokio::time::timeout(
+        std::time::Duration::from_millis(750),
+        tokio::net::TcpStream::connect(&address),
+    )
+    .await;
+
+    match connect_result {
+        Ok(Ok(_)) => Ok(address),
+        Ok(Err(e)) => Err(format!("connect failed: {}", e)),
+        Err(_) => Err("connect timeout".to_string()),
+    }
+}
+
+async fn check_disk_space(path: &str, min_required_bytes: u64) -> Result<u64, String> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .map_err(|e| format!("cannot prepare path '{}': {}", path, e))?;
+
+    let output = tokio::process::Command::new("df")
+        .args(["-Pk", path])
+        .output()
+        .await
+        .map_err(|e| format!("failed to execute df: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("df failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .nth(1)
+        .ok_or_else(|| "unexpected df output".to_string())?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 4 {
+        return Err("unexpected df output format".to_string());
+    }
+
+    let available_kib = cols[3]
+        .parse::<u64>()
+        .map_err(|e| format!("cannot parse available space: {}", e))?;
+    let available_bytes = available_kib.saturating_mul(1024);
+    if available_bytes < min_required_bytes {
+        return Ok(available_bytes);
+    }
+    Ok(available_bytes)
 }
 
 // ---------------------------------------------------------------------------

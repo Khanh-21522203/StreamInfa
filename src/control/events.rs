@@ -65,10 +65,23 @@ pub async fn run_event_handler<S: MediaStore>(
     mut rx: mpsc::Receiver<PipelineEvent>,
     state_manager: Arc<StreamStateManager>,
     store: Arc<S>,
+    cancel: tokio_util::sync::CancellationToken,
 ) {
     info!("event handler task started");
 
-    while let Some(event) = rx.recv().await {
+    loop {
+        let event = tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("event handler task cancelled");
+                break;
+            }
+            event = rx.recv() => event,
+        };
+
+        let Some(event) = event else {
+            break;
+        };
+
         match event {
             PipelineEvent::StreamStarted {
                 stream_id,
