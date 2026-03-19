@@ -32,7 +32,7 @@ A backend media infrastructure platform built in Rust for live and VOD video str
 - Retry logic with exponential backoff (3 retries, 100ms initial backoff)
 - Path-style addressing support for MinIO
 - Automatic segment cleanup for expired live segments and error-state streams
-- Storage path format: `{stream_id}/{rendition}/{segment_number}.m4s`
+- Storage path format: `{stream_id}/{rendition}/{sequence:06}.m4s`
 
 ### Delivery
 - **Axum HTTP origin server** with full HLS delivery
@@ -42,7 +42,7 @@ A backend media infrastructure platform built in Rust for live and VOD video str
 - CORS configured for cross-origin playback
 
 ### Control Plane REST API
-- Stream lifecycle management (create, list, get, delete)
+- Stream lifecycle management (create, list, get, delete, rotate key)
 - Bearer token authentication for admin endpoints
 - Stream state machine: `Pending → Live → Processing → Ready` (with `Error` and `Deleted`)
 - Concurrent state management via DashMap
@@ -50,7 +50,9 @@ A backend media infrastructure platform built in Rust for live and VOD video str
 ### Observability
 - Prometheus metrics at `/metrics` (ingest, transcode, packaging, storage, delivery, system)
 - Structured JSON logging via `tracing`
-- Health endpoints: `/healthz` (liveness), `/readyz` (readiness with FFmpeg check)
+- Health endpoints:
+  - `/healthz` (liveness)
+  - `/readyz` (readiness checks: storage, ffmpeg, RTMP listener, disk space)
 
 ### Security
 - Stream key authentication for RTMP ingest
@@ -154,7 +156,7 @@ The `S3MediaStore` in `src/storage/s3.rs` already supports:
 
 ### Prerequisites
 
-- **Rust** 1.77+ (2021 edition)
+- **Rust** 1.82+ (2021 edition)
 - **MinIO** or any S3-compatible storage (optional — in-memory store used by default)
 - **FFmpeg** (optional — required for production transcoding, enable with `--features ffmpeg`)
 
@@ -198,7 +200,7 @@ allowed_audio_codecs = ["aac", "mp3"]
 max_duration_secs = 21600.0
 upload_timeout_secs = 60
 max_concurrent_rtmp_connections = 50
-max_concurrent_live_streams = 5
+max_concurrent_live_streams = 10
 max_concurrent_uploads = 10
 max_pending_connections = 100
 
@@ -250,6 +252,8 @@ access_key_id = ""
 secret_access_key = ""
 region = "us-east-1"
 path_style = true
+max_concurrent_requests = 50
+request_timeout_secs = 30
 
 [delivery]
 cache_control_live = "no-cache, no-store"
@@ -262,6 +266,7 @@ log_format = "json"
 metrics_enabled = true
 tracing_enabled = false
 tracing_endpoint = "http://localhost:4317"
+tracing_sample_rate = 0.1
 
 [auth]
 ingest_stream_keys = []
@@ -274,7 +279,13 @@ ttl_secs = 300
 segment_ttl_secs = 3600
 
 [security]
+max_rtmp_chunk_size = 65536
+max_amf_string_length = 4096
+max_flv_tag_size_bytes = 16777216
 max_json_body_bytes = 1048576
+brute_force_max_attempts = 5
+brute_force_window_secs = 60
+brute_force_block_secs = 300
 ```
 
 #### Environment Variable Overrides
@@ -373,6 +384,13 @@ curl -X DELETE http://localhost:8080/api/v1/streams/<stream_id> \
   -H "Authorization: Bearer <admin_token>"
 ```
 
+#### Rotate Stream Key
+
+```bash
+curl -X POST http://localhost:8080/api/v1/streams/<stream_id>/rotate-key \
+  -H "Authorization: Bearer <admin_token>"
+```
+
 #### Health Checks
 
 ```bash
@@ -401,3 +419,4 @@ cargo test --test e2e_playback_flow -- --nocapture
 3. Deploy helper: `scripts/deploy.sh`
 4. Post-deploy verifier: `scripts/post_deploy_verify.sh`
 5. Rollback helper: `scripts/rollback.sh`
+6. Release readiness checklist: `docs/devops/release-readiness.md`
