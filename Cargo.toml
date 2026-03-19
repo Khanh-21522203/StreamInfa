@@ -72,3 +72,10 @@ ffmpeg-next = { version = "7", optional = true }
 default = []
 s3 = ["aws-sdk-s3", "aws-config", "aws-credential-types", "aws-smithy-types"]
 ffmpeg = ["ffmpeg-next"]
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "pipeline_micro"
+harness = false

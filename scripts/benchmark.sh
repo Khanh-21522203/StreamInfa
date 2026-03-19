@@ -4,9 +4,16 @@ set -euo pipefail
 
 SCENARIO="${1:-all}"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
+CONTROL_BASE_URL="${CONTROL_BASE_URL:-${BASE_URL}}"
 DURATION="${DURATION:-30s}"
 VUS="${VUS:-20}"
 CONTROL_CREATE_VUS="${CONTROL_CREATE_VUS:-5}"
+SOAK_DURATION="${SOAK_DURATION:-${DURATION}}"
+SOAK_DELIVERY_VUS="${SOAK_DELIVERY_VUS:-${VUS}}"
+SOAK_CONTROL_VUS="${SOAK_CONTROL_VUS:-2}"
+OVERLOAD_DURATION="${OVERLOAD_DURATION:-120s}"
+OVERLOAD_VUS="${OVERLOAD_VUS:-80}"
+OVERLOAD_CONTROL_CREATE_VUS="${OVERLOAD_CONTROL_CREATE_VUS:-8}"
 INGEST_UPLOAD_VUS="${INGEST_UPLOAD_VUS:-2}"
 INGEST_READY_TIMEOUT_SECS="${INGEST_READY_TIMEOUT_SECS:-120}"
 INGEST_POLL_INTERVAL_MS="${INGEST_POLL_INTERVAL_MS:-500}"
@@ -24,19 +31,40 @@ K6_DIR="${SCRIPT_DIR}/k6"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:0.50.0}"
 BENCH_OUT_DIR="${BENCH_OUT_DIR:-${SCRIPT_DIR}/../.tmp/benchmarks/$(date +%Y%m%d-%H%M%S)}"
 METRICS_HELPER="${SCRIPT_DIR}/benchmark-metrics.sh"
+LIVE_RTMP_HELPER="${SCRIPT_DIR}/benchmark-live-rtmp.sh"
+FAULT_HELPER="${SCRIPT_DIR}/benchmark-fault-injection.sh"
+CAPACITY_HELPER="${SCRIPT_DIR}/benchmark-capacity.sh"
+OPS_HELPER="${SCRIPT_DIR}/benchmark-ops-path.sh"
+MICRO_HELPER="${SCRIPT_DIR}/benchmark-micro.sh"
 UPLOAD_FIXTURE_HOST="${K6_DIR}/fixtures/upload-sample.mp4"
 UPLOAD_FIXTURE_CONTAINER="/scripts/fixtures/upload-sample.mp4"
+
+if [[ "${CONTROL_BASE_URL}" == *"host.docker.internal"* ]]; then
+    CONTROL_BASE_URL="${CONTROL_BASE_URL//host.docker.internal/localhost}"
+fi
+
+CURL_BIN="curl"
+if command -v curl.exe >/dev/null 2>&1; then
+    CURL_BIN="curl.exe"
+fi
 
 usage() {
     cat <<'EOF'
 Usage:
-  ./scripts/benchmark.sh [control|ingest|delivery|all]
+  ./scripts/benchmark.sh [control|ingest|delivery|soak|overload|live-rtmp|fault|capacity|ops|micro|all|all-plus]
 
 Environment:
   BASE_URL                 Service base URL (default: http://localhost:8080)
+  CONTROL_BASE_URL         Base URL for shell-side API calls (default: BASE_URL; host.docker.internal auto-mapped to localhost)
   DURATION                 k6 scenario duration (default: 30s)
   VUS                      VUs for steady read scenarios (default: 20)
   CONTROL_CREATE_VUS       VUs for create/delete scenario (default: 5)
+  SOAK_DURATION            Duration for soak scenario (default: DURATION)
+  SOAK_DELIVERY_VUS        Delivery VUs during soak (default: VUS)
+  SOAK_CONTROL_VUS         Control VUs during soak (default: 2)
+  OVERLOAD_DURATION        Duration for overload scenario (default: 120s)
+  OVERLOAD_VUS             Delivery VUs during overload (default: 80)
+  OVERLOAD_CONTROL_CREATE_VUS VUs for control churn during overload (default: 8)
   ADMIN_TOKEN              Required for control, ingest, and auto-prepare delivery
 
   INGEST_UPLOAD_VUS        VUs for ingest upload scenario (default: 2)
@@ -54,10 +82,39 @@ Environment:
   METRICS_URL              Metrics endpoint URL (default: BASE_URL/metrics)
   BENCH_OUT_DIR            Output directory for summaries and snapshots
 
+  Live RTMP helper variables:
+  LIVE_RTMP_PUBLISH_SECS   Publisher runtime seconds (default: 45)
+  LIVE_RTMP_READY_TIMEOUT_SECS Max wait for first segment (default: 120)
+  LIVE_RTMP_POLL_INTERVAL_MS Poll interval for HLS readiness checks (default: 500)
+
+  Fault-injection helper variables:
+  FAULT_INJECT_CMD         Command executed to trigger fault (required for fault scenario)
+  FAULT_RECOVER_CMD        Optional command to recover from fault
+  FAULT_INJECT_AFTER_SECS  Delay before fault command (default: 20)
+  FAULT_RECOVER_AFTER_SECS Delay before recovery command (default: 60)
+
+  Capacity helper variables:
+  CAPACITY_START_VUS       Initial VUs for capacity search (default: 10)
+  CAPACITY_STEP_VUS        Step VUs for capacity search (default: 10)
+  CAPACITY_MAX_VUS         Max VUs for capacity search (default: 200)
+
+  Ops helper variables:
+  OPS_START_CMD            Optional command to start service process under test
+  OPS_STOP_CMD             Optional command to stop managed process
+  OPS_RELOAD_CMD           Optional command to trigger config reload
+  OPS_REQUIRE_READY        1 to require /readyz during ops checks, 0 to allow degraded readiness
+
 Examples:
   ADMIN_TOKEN=at_token ./scripts/benchmark.sh control
   ADMIN_TOKEN=at_token ./scripts/benchmark.sh ingest
   ADMIN_TOKEN=at_token DELIVERY_STREAM_ID=<uuidv7> ./scripts/benchmark.sh delivery
+  ADMIN_TOKEN=at_token ./scripts/benchmark.sh soak
+  ADMIN_TOKEN=at_token ./scripts/benchmark.sh overload
+  ADMIN_TOKEN=at_token ./scripts/benchmark.sh live-rtmp
+  ADMIN_TOKEN=at_token FAULT_INJECT_CMD='docker compose stop minio' FAULT_RECOVER_CMD='docker compose start minio' ./scripts/benchmark.sh fault
+  ADMIN_TOKEN=at_token ./scripts/benchmark.sh capacity
+  OPS_START_CMD='cargo run --release' OPS_RELOAD_CMD='pkill -HUP streaminfa' ./scripts/benchmark.sh ops
+  ./scripts/benchmark.sh micro
   ADMIN_TOKEN=at_token ./scripts/benchmark.sh all
 EOF
 }
@@ -168,6 +225,12 @@ run_k6() {
             -e DURATION="${DURATION}" \
             -e VUS="${VUS}" \
             -e CONTROL_CREATE_VUS="${CONTROL_CREATE_VUS}" \
+            -e SOAK_DURATION="${SOAK_DURATION}" \
+            -e SOAK_DELIVERY_VUS="${SOAK_DELIVERY_VUS}" \
+            -e SOAK_CONTROL_VUS="${SOAK_CONTROL_VUS}" \
+            -e OVERLOAD_DURATION="${OVERLOAD_DURATION}" \
+            -e OVERLOAD_VUS="${OVERLOAD_VUS}" \
+            -e OVERLOAD_CONTROL_CREATE_VUS="${OVERLOAD_CONTROL_CREATE_VUS}" \
             -e ADMIN_TOKEN="${ADMIN_TOKEN:-}" \
             -e INGEST_UPLOAD_VUS="${INGEST_UPLOAD_VUS}" \
             -e INGEST_READY_TIMEOUT_SECS="${INGEST_READY_TIMEOUT_SECS}" \
@@ -188,6 +251,12 @@ run_k6() {
         -e DURATION="${DURATION}" \
         -e VUS="${VUS}" \
         -e CONTROL_CREATE_VUS="${CONTROL_CREATE_VUS}" \
+        -e SOAK_DURATION="${SOAK_DURATION}" \
+        -e SOAK_DELIVERY_VUS="${SOAK_DELIVERY_VUS}" \
+        -e SOAK_CONTROL_VUS="${SOAK_CONTROL_VUS}" \
+        -e OVERLOAD_DURATION="${OVERLOAD_DURATION}" \
+        -e OVERLOAD_VUS="${OVERLOAD_VUS}" \
+        -e OVERLOAD_CONTROL_CREATE_VUS="${OVERLOAD_CONTROL_CREATE_VUS}" \
         -e ADMIN_TOKEN="${ADMIN_TOKEN:-}" \
         -e INGEST_UPLOAD_VUS="${INGEST_UPLOAD_VUS}" \
         -e INGEST_READY_TIMEOUT_SECS="${INGEST_READY_TIMEOUT_SECS}" \
@@ -247,7 +316,7 @@ wait_for_stream_ready() {
     local deadline=$((SECONDS + timeout_secs))
     while (( SECONDS < deadline )); do
         local status_body
-        status_body="$(curl -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" "${BASE_URL%/}/api/v1/streams/${stream_id}" || true)"
+        status_body="$("${CURL_BIN}" -fsS -H "Authorization: Bearer ${ADMIN_TOKEN}" "${CONTROL_BASE_URL%/}/api/v1/streams/${stream_id}" || true)"
         local status
         status="$(printf '%s' "${status_body}" | json_field status)"
 
@@ -282,14 +351,25 @@ prepare_delivery_stream() {
         exit 1
     fi
 
-    require_cmd curl
+    if ! command -v curl >/dev/null 2>&1 && ! command -v curl.exe >/dev/null 2>&1; then
+        echo "ERROR: curl/curl.exe is required for delivery auto-prepare." >&2
+        exit 1
+    fi
     ensure_upload_fixture
 
     echo "Preparing delivery stream via upload benchmark fixture..."
+    local upload_path="${UPLOAD_FIXTURE_HOST}"
+    if [[ "${CURL_BIN}" == "curl.exe" ]]; then
+        local safe_dir="/tmp/streaminfa-bench"
+        mkdir -p "${safe_dir}"
+        local safe_file="${safe_dir}/upload-sample.mp4"
+        cp "${UPLOAD_FIXTURE_HOST}" "${safe_file}"
+        upload_path="${safe_file}"
+    fi
     local resp
-    resp="$(curl -fsS -X POST "${BASE_URL%/}/api/v1/streams/upload" \
+    resp="$("${CURL_BIN}" -fsS -X POST "${CONTROL_BASE_URL%/}/api/v1/streams/upload" \
         -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-        -F "file=@${UPLOAD_FIXTURE_HOST};type=video/mp4")"
+        -F "file=@${upload_path};type=video/mp4")"
 
     local stream_id
     stream_id="$(printf '%s' "${resp}" | json_field stream_id)"
@@ -341,6 +421,72 @@ run_delivery() {
     run_scenario "delivery" "delivery-origin.js"
 }
 
+run_soak() {
+    if [[ -z "${ADMIN_TOKEN:-}" ]]; then
+        echo "ERROR: ADMIN_TOKEN is required for soak benchmark." >&2
+        exit 1
+    fi
+
+    prepare_delivery_stream
+
+    echo "== Soak Benchmark =="
+    echo "base_url=${BASE_URL} duration=${SOAK_DURATION} delivery_vus=${SOAK_DELIVERY_VUS} control_vus=${SOAK_CONTROL_VUS} stream_id=${DELIVERY_STREAM_ID}"
+    DURATION="${SOAK_DURATION}" VUS="${SOAK_DELIVERY_VUS}" run_scenario "soak" "soak-mixed.js"
+}
+
+run_overload() {
+    if [[ -z "${ADMIN_TOKEN:-}" ]]; then
+        echo "ERROR: ADMIN_TOKEN is required for overload benchmark." >&2
+        exit 1
+    fi
+
+    prepare_delivery_stream
+
+    echo "== Overload / Backpressure Benchmark =="
+    echo "base_url=${BASE_URL} duration=${OVERLOAD_DURATION} delivery_vus=${OVERLOAD_VUS} control_churn_vus=${OVERLOAD_CONTROL_CREATE_VUS} stream_id=${DELIVERY_STREAM_ID}"
+    DURATION="${OVERLOAD_DURATION}" VUS="${OVERLOAD_VUS}" CONTROL_CREATE_VUS="${OVERLOAD_CONTROL_CREATE_VUS}" run_scenario "overload" "overload-backpressure.js"
+}
+
+run_helper_script() {
+    local helper="$1"
+    local helper_name="$2"
+
+    if [[ ! -f "${helper}" ]]; then
+        echo "ERROR: ${helper_name} helper script not found: ${helper}" >&2
+        exit 1
+    fi
+
+    bash "${helper}"
+}
+
+run_live_rtmp() {
+    if [[ -z "${ADMIN_TOKEN:-}" ]]; then
+        echo "ERROR: ADMIN_TOKEN is required for live RTMP benchmark." >&2
+        exit 1
+    fi
+    run_helper_script "${LIVE_RTMP_HELPER}" "live-rtmp"
+}
+
+run_fault() {
+    if [[ -z "${FAULT_INJECT_CMD:-}" ]]; then
+        echo "ERROR: FAULT_INJECT_CMD is required for fault benchmark." >&2
+        exit 1
+    fi
+    run_helper_script "${FAULT_HELPER}" "fault"
+}
+
+run_capacity() {
+    run_helper_script "${CAPACITY_HELPER}" "capacity"
+}
+
+run_ops() {
+    run_helper_script "${OPS_HELPER}" "ops"
+}
+
+run_micro() {
+    run_helper_script "${MICRO_HELPER}" "micro"
+}
+
 case "${SCENARIO}" in
     control)
         run_control
@@ -351,10 +497,41 @@ case "${SCENARIO}" in
     delivery)
         run_delivery
         ;;
+    soak)
+        run_soak
+        ;;
+    overload)
+        run_overload
+        ;;
+    live-rtmp)
+        run_live_rtmp
+        ;;
+    fault)
+        run_fault
+        ;;
+    capacity)
+        run_capacity
+        ;;
+    ops)
+        run_ops
+        ;;
+    micro)
+        run_micro
+        ;;
     all)
         run_control
         run_ingest
         run_delivery
+        ;;
+    all-plus)
+        run_control
+        run_ingest
+        run_delivery
+        run_soak
+        run_overload
+        run_capacity
+        run_ops
+        run_micro
         ;;
     -h|--help|help)
         usage

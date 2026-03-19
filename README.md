@@ -426,8 +426,34 @@ ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh ingest
 # Delivery benchmark (auto-prepares stream when DELIVERY_STREAM_ID is omitted)
 DELIVERY_STREAM_ID=<uuidv7> ./scripts/benchmark.sh delivery
 
-# Full suite
+# Soak/endurance benchmark (mixed delivery + control)
+ADMIN_TOKEN=<admin_token> SOAK_DURATION=30m ./scripts/benchmark.sh soak
+
+# Overload/backpressure benchmark
+ADMIN_TOKEN=<admin_token> OVERLOAD_VUS=120 OVERLOAD_DURATION=120s ./scripts/benchmark.sh overload
+
+# Live RTMP end-to-end benchmark (requires ffmpeg)
+ADMIN_TOKEN=<admin_token> LIVE_RTMP_PUBLISH_SECS=45 ./scripts/benchmark.sh live-rtmp
+
+# Fault-injection benchmark (example: storage outage and recovery)
+ADMIN_TOKEN=<admin_token> FAULT_INJECT_CMD='docker compose stop minio' FAULT_RECOVER_CMD='docker compose start minio' ./scripts/benchmark.sh fault
+
+# Capacity search benchmark (max passing VUs before threshold breach)
+ADMIN_TOKEN=<admin_token> CAPACITY_START_VUS=10 CAPACITY_STEP_VUS=10 CAPACITY_MAX_VUS=200 ./scripts/benchmark.sh capacity
+
+# Operational-path benchmark (startup/readiness/reload/shutdown timings)
+OPS_START_CMD='cargo run --release' OPS_RELOAD_CMD='pkill -HUP streaminfa' ./scripts/benchmark.sh ops
+# If readiness is intentionally degraded, allow probe-only mode:
+OPS_REQUIRE_READY=0 ./scripts/benchmark.sh ops
+
+# Pipeline microbenchmarks (criterion)
+./scripts/benchmark.sh micro
+
+# Baseline suite (control + ingest + delivery)
 ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh all
+
+# Extended suite (all + soak + overload + capacity + ops + micro)
+ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh all-plus
 ```
 
 Artifacts are written to:
@@ -435,12 +461,22 @@ Artifacts are written to:
 2. Per-scenario k6 summary: `<scenario>-<timestamp>-k6-summary.json`.
 3. Optional metrics snapshots (`METRICS_SNAPSHOT=1`): `...-metrics-before.prom` and `...-metrics-after.prom`.
 4. Optional metrics delta (when both snapshots exist): `...-metrics-delta.txt`.
+5. Helper summaries for non-k6 workflows (`live-rtmp`, `capacity`, `ops`, `micro`).
 
 Detailed guide: `docs/testing/benchmarking.md`
 
 Tip (Docker k6 against local service):
 1. Use `BASE_URL=http://host.docker.internal:8080`.
 2. Keep metrics scrape URL on host side: `METRICS_URL=http://localhost:8080/metrics`.
+3. For shell-side API calls in helper scenarios, keep `CONTROL_BASE_URL=http://localhost:8080`.
+
+Benchmark types covered:
+1. Baseline: control, ingest, delivery.
+2. Reliability: soak, overload/backpressure, fault-injection.
+3. Capacity: progressive VU search.
+4. Live pipeline: RTMP publish to first segment.
+5. Ops path: startup/readiness/reload/shutdown.
+6. Microbench: manifest/init/segment-index hot paths.
 
 ### Control Benchmark Snapshot (Latest: 2026-03-19 09:00, Post-Optimization)
 
