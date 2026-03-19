@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 
 use crate::core::types::RenditionId;
@@ -15,8 +17,8 @@ pub struct RenditionInfo {
     pub height: u32,
     pub video_bitrate_kbps: u32,
     pub audio_bitrate_kbps: u32,
-    pub profile: String,
-    pub level: String,
+    pub profile: Arc<str>,
+    pub level: Arc<str>,
     pub frame_rate: f64,
     pub has_audio: bool,
 }
@@ -186,8 +188,8 @@ mod tests {
                 height: 1080,
                 video_bitrate_kbps: 3500,
                 audio_bitrate_kbps: 128,
-                profile: "high".to_string(),
-                level: "4.1".to_string(),
+                profile: Arc::from("high"),
+                level: Arc::from("4.1"),
                 frame_rate: 30.0,
                 has_audio: true,
             },
@@ -197,8 +199,8 @@ mod tests {
                 height: 720,
                 video_bitrate_kbps: 2000,
                 audio_bitrate_kbps: 128,
-                profile: "main".to_string(),
-                level: "3.1".to_string(),
+                profile: Arc::from("main"),
+                level: Arc::from("3.1"),
                 frame_rate: 30.0,
                 has_audio: true,
             },
@@ -208,8 +210,8 @@ mod tests {
                 height: 480,
                 video_bitrate_kbps: 1000,
                 audio_bitrate_kbps: 96,
-                profile: "main".to_string(),
-                level: "3.0".to_string(),
+                profile: Arc::from("main"),
+                level: Arc::from("3.0"),
                 frame_rate: 30.0,
                 has_audio: true,
             },

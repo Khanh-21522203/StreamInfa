@@ -100,48 +100,55 @@ async fn serve_object(
     state: &AppState,
     path: &str,
     stream_id: &str,
-    object_type: Option<&str>,
+    object_type: Option<&'static str>,
     request_headers: &HeaderMap,
 ) -> Response {
     let start = std::time::Instant::now();
     let _delivery_guard = DeliveryConnectionGuard::new();
-    let otype = object_type.unwrap_or_else(|| obs::classify_object_type(path));
-    // Check if stream exists and is in a serveable state
-    if let Ok(sid) = stream_id.parse::<uuid::Uuid>() {
-        let sid = StreamId::from_uuid(sid);
-        if let Some(entry) = state.state_manager.get_stream(sid).await {
-            match entry.state {
-                StreamState::Pending => {
-                    let response = error_json(
-                        StatusCode::NOT_FOUND,
-                        "stream_not_ready",
-                        &format!("Stream '{}' is not yet ingesting.", stream_id),
-                    );
-                    finalize_delivery_metrics(&response, otype, start);
-                    return response;
-                }
-                StreamState::Error => {
-                    let response = error_json(
-                        StatusCode::GONE,
-                        "stream_error",
-                        &format!("Stream '{}' encountered an error.", stream_id),
-                    );
-                    finalize_delivery_metrics(&response, otype, start);
-                    return response;
-                }
-                StreamState::Deleted => {
-                    let response = error_json(
-                        StatusCode::NOT_FOUND,
-                        "stream_not_found",
-                        &format!("Stream '{}' has been deleted.", stream_id),
-                    );
-                    finalize_delivery_metrics(&response, otype, start);
-                    return response;
-                }
-                _ => {} // Live, Processing, Ready — all serveable
+    let otype: &'static str = object_type.unwrap_or_else(|| obs::classify_object_type(path));
+
+    // Check stream state once — no full StreamEntry clone, just the state enum.
+    // Reused below for Cache-Control header (is_live) without a second lookup.
+    let stream_state = stream_id.parse::<uuid::Uuid>().ok().and_then(|uuid| {
+        let sid = StreamId::from_uuid(uuid);
+        state.state_manager.get_stream_state(sid)
+    });
+
+    if let Some(ss) = stream_state {
+        match ss {
+            StreamState::Pending => {
+                let response = error_json(
+                    StatusCode::NOT_FOUND,
+                    "stream_not_ready",
+                    &format!("Stream '{}' is not yet ingesting.", stream_id),
+                );
+                finalize_delivery_metrics(&response, otype, start);
+                return response;
             }
+            StreamState::Error => {
+                let response = error_json(
+                    StatusCode::GONE,
+                    "stream_error",
+                    &format!("Stream '{}' encountered an error.", stream_id),
+                );
+                finalize_delivery_metrics(&response, otype, start);
+                return response;
+            }
+            StreamState::Deleted => {
+                let response = error_json(
+                    StatusCode::NOT_FOUND,
+                    "stream_not_found",
+                    &format!("Stream '{}' has been deleted.", stream_id),
+                );
+                finalize_delivery_metrics(&response, otype, start);
+                return response;
+            }
+            _ => {} // Live, Processing, Ready — all serveable
         }
     }
+
+    // Determine live/VOD for Cache-Control headers from the state already fetched above.
+    let is_live = stream_state == Some(StreamState::Live);
 
     // Parse Range header if present
     let range = match request_headers
@@ -173,7 +180,7 @@ async fn serve_object(
             &etag,
             path,
             range,
-            is_live_manifest(path, state).await,
+            is_live,
             &state.config.delivery,
         );
         finalize_delivery_metrics(&response, otype, start);
@@ -207,7 +214,7 @@ async fn serve_object(
                 &output.etag,
                 path,
                 range,
-                is_live_manifest(path, state).await,
+                is_live,
                 &state.config.delivery,
             );
             finalize_delivery_metrics(&response, otype, start);
@@ -259,7 +266,7 @@ impl Drop for DeliveryConnectionGuard {
     }
 }
 
-fn finalize_delivery_metrics(response: &Response, object_type: &str, start: std::time::Instant) {
+fn finalize_delivery_metrics(response: &Response, object_type: &'static str, start: std::time::Instant) {
     obs::inc_delivery_request(status_bucket(response.status()), object_type);
     obs::record_delivery_request_duration(object_type, start.elapsed().as_secs_f64());
     if response.status().is_success() {
@@ -388,21 +395,6 @@ fn parse_range_header(value: &str) -> Option<(u64, u64)> {
         return None;
     }
     Some((start, end))
-}
-
-/// Check if a path refers to a live stream's manifest.
-async fn is_live_manifest(path: &str, state: &AppState) -> bool {
-    if !path.ends_with(".m3u8") {
-        return false;
-    }
-    let stream_id_str = path.split('/').next().unwrap_or("");
-    if let Ok(uuid) = stream_id_str.parse::<uuid::Uuid>() {
-        let sid = StreamId::from_uuid(uuid);
-        if let Some(entry) = state.state_manager.get_stream(sid).await {
-            return entry.state == StreamState::Live;
-        }
-    }
-    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,7 +1199,7 @@ mod tests {
 fn authenticate_admin(
     state: &AppState,
     headers: &HeaderMap,
-    endpoint: &str,
+    endpoint: &'static str,
 ) -> Result<(), Response> {
     let token = headers
         .get(header::AUTHORIZATION)

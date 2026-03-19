@@ -61,7 +61,7 @@ pub fn create_event_channel() -> (mpsc::Sender<PipelineEvent>, mpsc::Receiver<Pi
 ///
 /// This task reads from the event channel and updates stream state accordingly.
 /// It runs until the channel is closed (all senders dropped).
-pub async fn run_event_handler<S: MediaStore>(
+pub async fn run_event_handler<S: MediaStore + 'static>(
     mut rx: mpsc::Receiver<PipelineEvent>,
     state_manager: Arc<StreamStateManager>,
     store: Arc<S>,
@@ -96,7 +96,12 @@ pub async fn run_event_handler<S: MediaStore>(
                     .await;
 
                 // Write stream metadata.json to storage (FR-STORAGE-04)
-                write_metadata_json(store.as_ref(), stream_id, &media_info).await;
+                // Spawned independently so slow S3 writes don't stall the event loop.
+                let store_arc = Arc::clone(&store);
+                let media_info_clone = media_info.clone();
+                tokio::spawn(async move {
+                    write_metadata_json(store_arc.as_ref(), stream_id, &media_info_clone).await;
+                });
             }
 
             PipelineEvent::SegmentProduced {

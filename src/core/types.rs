@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -271,9 +273,9 @@ pub struct EncodedSegment {
     /// Audio bitrate in kbps for this rendition.
     pub audio_bitrate_kbps: u32,
     /// H.264 profile name (e.g. "high", "main").
-    pub profile: String,
+    pub profile: Arc<str>,
     /// H.264 level (e.g. "4.1", "3.1").
-    pub level: String,
+    pub level: Arc<str>,
     /// Source frame rate.
     pub frame_rate: f64,
 }

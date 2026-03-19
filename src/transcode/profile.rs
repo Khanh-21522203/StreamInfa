@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::core::config::TranscodeProfile;
 use crate::core::types::RenditionId;
 
@@ -13,9 +15,9 @@ pub struct SelectedRendition {
     pub height: u32,
     pub video_bitrate_kbps: u32,
     pub audio_bitrate_kbps: u32,
-    pub profile: String,
-    pub level: String,
-    pub preset: String,
+    pub profile: Arc<str>,
+    pub level: Arc<str>,
+    pub preset: Arc<str>,
 }
 
 /// Select which renditions to produce based on input resolution.
@@ -38,9 +40,9 @@ pub fn select_renditions(
             height: r.height,
             video_bitrate_kbps: r.bitrate_kbps,
             audio_bitrate_kbps: r.audio_bitrate_kbps,
-            profile: r.profile.clone(),
-            level: r.level.clone(),
-            preset: r.preset.clone(),
+            profile: Arc::from(r.profile.as_str()),
+            level: Arc::from(r.level.as_str()),
+            preset: Arc::from(r.preset.as_str()),
         })
         .collect();
 
@@ -54,9 +56,9 @@ pub fn select_renditions(
                 height: input_height,
                 video_bitrate_kbps: lowest.bitrate_kbps,
                 audio_bitrate_kbps: lowest.audio_bitrate_kbps,
-                profile: lowest.profile.clone(),
-                level: lowest.level.clone(),
-                preset: lowest.preset.clone(),
+                profile: Arc::from(lowest.profile.as_str()),
+                level: Arc::from(lowest.level.as_str()),
+                preset: Arc::from(lowest.preset.as_str()),
             });
         }
     }

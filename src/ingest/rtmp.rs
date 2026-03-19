@@ -253,8 +253,18 @@ impl RtmpConnection {
         let stream_key = self.process_commands(&mut socket, peer_addr).await?;
 
         // Phase 2b: Authenticate stream key with brute-force protection (security.md §2.1)
-        self.auth
-            .validate_stream_key_with_ip(&stream_key, peer_addr.ip())?;
+        // bcrypt::verify is CPU-bound (~100ms); offload to blocking thread pool so the
+        // async executor isn't stalled during auth.
+        {
+            let auth = Arc::clone(&self.auth);
+            let key = stream_key.clone();
+            let ip = peer_addr.ip();
+            tokio::task::spawn_blocking(move || auth.validate_stream_key_with_ip(&key, ip))
+                .await
+                .map_err(|e| IngestError::AuthFailed {
+                    reason: format!("auth task panicked: {}", e),
+                })??;
+        }
 
         // Acquire active stream permit
         let _stream_permit = match self.active_streams.clone().try_acquire_owned() {
@@ -469,15 +479,15 @@ impl RtmpConnection {
                                        // S1: timestamp (4 bytes) + zero (4 bytes) + random (1528 bytes)
         response.put_u32(0); // timestamp
         response.put_u32(0); // zero
-        response.extend_from_slice(&vec![0xABu8; HANDSHAKE_SIZE - 8]); // random fill
+        response.put_bytes(0xAB, HANDSHAKE_SIZE - 8); // random fill
                                                                        // S2: echo C1
         response.extend_from_slice(&c1);
         socket.write_all(&response).await?;
         socket.flush().await?;
 
-        // Read C2 (1536 bytes) — we don't validate it strictly
-        let mut c2 = vec![0u8; HANDSHAKE_SIZE];
-        socket.read_exact(&mut c2).await?;
+        // Read C2 (1536 bytes) — we don't validate it strictly; reuse c1 buffer
+        c1.fill(0);
+        socket.read_exact(&mut c1).await?;
 
         Ok(())
     }
@@ -560,6 +570,8 @@ impl RtmpConnection {
         let mut chunk_reader = ChunkReader::new();
         let mut demuxer = FlvDemuxer::new(stream_id);
         let mut consecutive_errors: u32 = 0;
+        // Cache once; avoids 2 allocations per frame in the hot path below
+        let stream_id_str = stream_id.to_string();
 
         // Wait for sequence header with timeout
         let seq_header_deadline = tokio::time::Instant::now()
@@ -625,10 +637,10 @@ impl RtmpConnection {
                             } else {
                                 "video"
                             };
-                            obs::inc_ingest_frames(&stream_id.to_string(), track_label);
+                            obs::inc_ingest_frames(&stream_id_str, track_label);
                             obs::add_ingest_bytes(
                                 "rtmp",
-                                &stream_id.to_string(),
+                                &stream_id_str,
                                 frame.data.len() as u64,
                             );
                             // Send to transcode pipeline with backpressure metrics
@@ -1037,9 +1049,9 @@ impl ChunkReader {
 
         while remaining > 0 {
             let to_read = remaining.min(self.chunk_size);
-            let mut chunk_data = vec![0u8; to_read];
-            socket.read_exact(&mut chunk_data).await?;
-            data.extend_from_slice(&chunk_data);
+            let offset = data.len();
+            data.resize(offset + to_read, 0);
+            socket.read_exact(&mut data[offset..]).await?;
             remaining -= to_read;
 
             // If more chunks needed, read continuation header (fmt=3)

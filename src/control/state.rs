@@ -1,5 +1,8 @@
-use dashmap::DashMap;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
+
+use dashmap::DashMap;
 use tracing::{debug, info, warn};
 
 use crate::core::error::StateError;
@@ -79,12 +82,36 @@ pub struct StreamEntry {
 #[derive(Clone)]
 pub struct StreamStateManager {
     streams: DashMap<StreamId, StreamEntry>,
+    /// Per-state counters for O(1) gauge updates. Indexed by `state_index()`.
+    /// Arc so that `Clone` shares the same counters (production always uses Arc<Self>).
+    state_counts: Arc<[AtomicI64; 6]>,
 }
 
 impl StreamStateManager {
     pub fn new() -> Self {
         Self {
             streams: DashMap::new(),
+            state_counts: Arc::new([
+                AtomicI64::new(0),
+                AtomicI64::new(0),
+                AtomicI64::new(0),
+                AtomicI64::new(0),
+                AtomicI64::new(0),
+                AtomicI64::new(0),
+            ]),
+        }
+    }
+
+    /// Map a `StreamState` to its index in `state_counts`.
+    #[inline]
+    fn state_index(state: StreamState) -> usize {
+        match state {
+            StreamState::Pending => 0,
+            StreamState::Live => 1,
+            StreamState::Processing => 2,
+            StreamState::Ready => 3,
+            StreamState::Error => 4,
+            StreamState::Deleted => 5,
         }
     }
 
@@ -100,8 +127,8 @@ impl StreamStateManager {
         };
 
         self.streams.insert(stream_id, entry.clone());
-
-        // Update stream count gauges
+        self.state_counts[Self::state_index(StreamState::Pending)]
+            .fetch_add(1, Ordering::Relaxed);
         self.update_stream_gauges();
 
         info!(%stream_id, mode = %ingest_mode, "stream created in PENDING state");
@@ -151,7 +178,9 @@ impl StreamStateManager {
             obs::clear_stream_metrics(&stream_id.to_string());
         }
 
-        // Update stream count gauges
+        // Update per-state counters (O(1) instead of O(n) scan)
+        self.state_counts[Self::state_index(current)].fetch_sub(1, Ordering::Relaxed);
+        self.state_counts[Self::state_index(new_state)].fetch_add(1, Ordering::Relaxed);
         self.update_stream_gauges();
 
         info!(
@@ -198,12 +227,26 @@ impl StreamStateManager {
         entry_ref.error_message = Some(error_message);
         let updated = entry_ref.clone();
         drop(entry_ref);
+
         obs::clear_stream_metrics(&stream_id.to_string());
+
+        // Update per-state counters (O(1) instead of O(n) scan)
+        self.state_counts[Self::state_index(current)].fetch_sub(1, Ordering::Relaxed);
+        self.state_counts[Self::state_index(StreamState::Error)].fetch_add(1, Ordering::Relaxed);
         self.update_stream_gauges();
+
         Ok(updated)
     }
 
-    /// Get the current state of a stream.
+    /// Get only the current state of a stream — no allocation, no clone.
+    ///
+    /// Prefer this over `get_stream` on hot paths (e.g. delivery handlers) where
+    /// only the state enum is needed.
+    pub fn get_stream_state(&self, stream_id: StreamId) -> Option<StreamState> {
+        self.streams.get(&stream_id).map(|r| r.state)
+    }
+
+    /// Get the current state of a stream (full entry with metadata and renditions).
     pub async fn get_stream(&self, stream_id: StreamId) -> Option<StreamEntry> {
         self.streams.get(&stream_id).map(|r| r.clone())
     }
@@ -331,29 +374,33 @@ impl StreamStateManager {
 
     /// Remove a stream record entirely (for audit cleanup after retention).
     pub async fn remove_stream(&self, stream_id: StreamId) -> bool {
-        let removed = self.streams.remove(&stream_id).is_some();
-        if removed {
+        if let Some((_key, removed_entry)) = self.streams.remove(&stream_id) {
+            self.state_counts[Self::state_index(removed_entry.state)]
+                .fetch_sub(1, Ordering::Relaxed);
             obs::clear_stream_metrics(&stream_id.to_string());
             self.update_stream_gauges();
+            true
+        } else {
+            false
         }
-        removed
     }
 
     /// Update Prometheus stream count gauges per state.
+    ///
+    /// Reads from pre-maintained atomic counters — O(1) instead of O(n) full scan.
     fn update_stream_gauges(&self) {
-        let mut counts: HashMap<StreamState, usize> = HashMap::new();
-        for entry in self.streams.iter() {
-            *counts.entry(entry.value().state).or_insert(0) += 1;
-        }
-        for state in &[
+        const STATES: [StreamState; 6] = [
             StreamState::Pending,
             StreamState::Live,
             StreamState::Processing,
             StreamState::Ready,
             StreamState::Error,
             StreamState::Deleted,
-        ] {
-            let count = counts.get(state).copied().unwrap_or(0);
+        ];
+        for state in &STATES {
+            let count = self.state_counts[Self::state_index(*state)]
+                .load(Ordering::Relaxed)
+                .max(0);
             obs::set_streams_total(&state.to_string(), count as f64);
         }
     }
@@ -586,5 +633,28 @@ mod tests {
         let (page2, total2) = manager.list_streams_paginated(None, 2, 2).await;
         assert_eq!(total2, 3);
         assert_eq!(page2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_stream_state_no_clone() {
+        let manager = StreamStateManager::new();
+        let stream_id = StreamId::new();
+
+        assert_eq!(manager.get_stream_state(stream_id), None);
+
+        manager.create_stream(stream_id, IngestMode::Live).await;
+        assert_eq!(
+            manager.get_stream_state(stream_id),
+            Some(StreamState::Pending)
+        );
+
+        manager
+            .transition(stream_id, StreamState::Live)
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.get_stream_state(stream_id),
+            Some(StreamState::Live)
+        );
     }
 }

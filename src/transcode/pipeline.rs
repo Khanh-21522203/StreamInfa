@@ -116,6 +116,7 @@ impl TranscodePipeline {
             .collect();
 
         let mut consecutive_decode_errors: u32 = 0;
+        let stream_id_str = stream_id.to_string();
 
         // Main decode loop
         loop {
@@ -145,9 +146,9 @@ impl TranscodePipeline {
             // This placeholder will be replaced with actual FFmpeg FFI calls.
 
             let frame_start = std::time::Instant::now();
-            obs::set_transcode_queue_depth(&stream_id.to_string(), frame_rx.len() as f64);
+            obs::set_transcode_queue_depth(&stream_id_str, frame_rx.len() as f64);
             match self
-                .process_frame(&frame, &mut accumulators, &segment_tx)
+                .process_frame(&frame, &stream_id_str, &mut accumulators, &segment_tx)
                 .await
             {
                 Ok(()) => {
@@ -155,17 +156,13 @@ impl TranscodePipeline {
                     let frame_latency = frame_start.elapsed().as_secs_f64();
                     let fps = 1.0 / frame_latency.max(0.001);
                     for (rendition, _) in accumulators.iter() {
-                        obs::record_transcode_latency(&rendition.id.to_string(), frame_latency);
-                        obs::set_transcode_fps(
-                            &stream_id.to_string(),
-                            &rendition.id.to_string(),
-                            fps,
-                        );
+                        obs::record_transcode_latency(rendition.id.as_str(), frame_latency);
+                        obs::set_transcode_fps(&stream_id_str, rendition.id.as_str(), fps);
                     }
                 }
                 Err(e) => {
                     consecutive_decode_errors += 1;
-                    obs::inc_transcode_error(&stream_id.to_string(), transcode_error_type(&e));
+                    obs::inc_transcode_error(&stream_id_str, transcode_error_type(&e));
                     if consecutive_decode_errors >= MAX_CONSECUTIVE_DECODE_ERRORS {
                         error!(
                             %stream_id,
@@ -212,6 +209,7 @@ impl TranscodePipeline {
     async fn process_frame(
         &self,
         frame: &DemuxedFrame,
+        stream_id_str: &str,
         accumulators: &mut [(SelectedRendition, SegmentAccumulator)],
         segment_tx: &mpsc::Sender<EncodedSegment>,
     ) -> Result<(), TranscodeError> {
@@ -229,12 +227,9 @@ impl TranscodePipeline {
         // Fan out to all rendition accumulators
         for (rendition, acc) in accumulators.iter_mut() {
             if let Some(segment) = acc.push(packet.clone()) {
-                obs::inc_transcode_segments(
-                    &frame.stream_id.to_string(),
-                    &rendition.id.to_string(),
-                );
+                obs::inc_transcode_segments(stream_id_str, rendition.id.as_str());
                 obs::record_transcode_segment_duration(
-                    &rendition.id.to_string(),
+                    rendition.id.as_str(),
                     segment.duration_secs,
                 );
                 if crate::core::metrics::send_with_backpressure(

@@ -19,25 +19,24 @@ pub fn describe_backpressure_metrics() {
 }
 
 /// Record current channel utilization for a given channel.
-pub fn record_channel_metrics(label: &str, current_len: usize, capacity: usize) {
+pub fn record_channel_metrics(label: &'static str, current_len: usize, capacity: usize) {
     let utilization = if capacity > 0 {
         current_len as f64 / capacity as f64
     } else {
         0.0
     };
-    metrics::gauge!("streaminfa_channel_utilization", "channel_name" => label.to_string())
-        .set(utilization);
+    metrics::gauge!("streaminfa_channel_utilization", "channel_name" => label).set(utilization);
 }
 
 /// Record the time spent waiting on a channel send (performance-and-backpressure.md §4.4).
-pub fn record_channel_send_wait(channel_name: &str, wait_seconds: f64) {
-    metrics::histogram!("streaminfa_channel_send_wait_seconds", "channel_name" => channel_name.to_string())
+pub fn record_channel_send_wait(channel_name: &'static str, wait_seconds: f64) {
+    metrics::histogram!("streaminfa_channel_send_wait_seconds", "channel_name" => channel_name)
         .record(wait_seconds);
 }
 
 /// Increment backpressure event counter when a send blocks > 100ms.
-pub fn inc_backpressure_event(channel_name: &str) {
-    metrics::counter!("streaminfa_backpressure_events_total", "channel_name" => channel_name.to_string())
+pub fn inc_backpressure_event(channel_name: &'static str) {
+    metrics::counter!("streaminfa_backpressure_events_total", "channel_name" => channel_name)
         .increment(1);
 }
 
@@ -51,7 +50,7 @@ const BACKPRESSURE_THRESHOLD_MS: u128 = 100;
 pub async fn send_with_backpressure<T>(
     tx: &tokio::sync::mpsc::Sender<T>,
     value: T,
-    channel_name: &str,
+    channel_name: &'static str,
     capacity: usize,
 ) -> Result<(), tokio::sync::mpsc::error::SendError<T>> {
     // Record utilization before send

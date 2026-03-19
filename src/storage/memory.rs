@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use chrono::Utc;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 
 use crate::core::error::StorageError;
 use crate::core::types::StreamMetadata;
@@ -16,10 +15,10 @@ use super::{GetObjectOutput, MediaStore, ObjectInfo};
 
 /// In-memory storage backend for unit and integration tests.
 ///
-/// Stores all objects in a `HashMap<String, StoredObject>` behind a `RwLock`.
-/// No external dependencies required.
+/// Stores all objects in a `DashMap<String, StoredObject>` for fine-grained
+/// concurrent access without a global read/write lock.
 pub struct InMemoryMediaStore {
-    objects: Arc<RwLock<HashMap<String, StoredObject>>>,
+    objects: Arc<DashMap<String, StoredObject>>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +31,7 @@ struct StoredObject {
 impl InMemoryMediaStore {
     pub fn new() -> Self {
         Self {
-            objects: Arc::new(RwLock::new(HashMap::new())),
+            objects: Arc::new(DashMap::new()),
         }
     }
 }
@@ -50,8 +49,7 @@ impl MediaStore for InMemoryMediaStore {
         data: Bytes,
         content_type: &str,
     ) -> Result<(), StorageError> {
-        let mut objects = self.objects.write().await;
-        objects.insert(
+        self.objects.insert(
             path.to_string(),
             StoredObject {
                 data,
@@ -63,8 +61,7 @@ impl MediaStore for InMemoryMediaStore {
     }
 
     async fn put_manifest(&self, path: &str, content: &str) -> Result<(), StorageError> {
-        let mut objects = self.objects.write().await;
-        objects.insert(
+        self.objects.insert(
             path.to_string(),
             StoredObject {
                 data: Bytes::from(content.to_string()),
@@ -76,11 +73,13 @@ impl MediaStore for InMemoryMediaStore {
     }
 
     async fn get_object(&self, path: &str) -> Result<GetObjectOutput, StorageError> {
-        let objects = self.objects.read().await;
-        let obj = objects.get(path).ok_or_else(|| StorageError::S3GetFailed {
-            path: path.to_string(),
-            reason: "not found".to_string(),
-        })?;
+        let obj = self
+            .objects
+            .get(path)
+            .ok_or_else(|| StorageError::S3GetFailed {
+                path: path.to_string(),
+                reason: "not found".to_string(),
+            })?;
 
         Ok(GetObjectOutput {
             body: obj.data.clone(),
@@ -97,11 +96,13 @@ impl MediaStore for InMemoryMediaStore {
         start: u64,
         end: u64,
     ) -> Result<GetObjectOutput, StorageError> {
-        let objects = self.objects.read().await;
-        let obj = objects.get(path).ok_or_else(|| StorageError::S3GetFailed {
-            path: path.to_string(),
-            reason: "not found".to_string(),
-        })?;
+        let obj = self
+            .objects
+            .get(path)
+            .ok_or_else(|| StorageError::S3GetFailed {
+                path: path.to_string(),
+                reason: "not found".to_string(),
+            })?;
 
         let start = start as usize;
         let end = (end as usize).min(obj.data.len().saturating_sub(1));
@@ -129,34 +130,32 @@ impl MediaStore for InMemoryMediaStore {
     }
 
     async fn delete_object(&self, path: &str) -> Result<(), StorageError> {
-        let mut objects = self.objects.write().await;
-        objects.remove(path);
+        self.objects.remove(path);
         Ok(())
     }
 
     async fn delete_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
-        let mut objects = self.objects.write().await;
-        let keys_to_delete: Vec<String> = objects
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect();
-        let count = keys_to_delete.len() as u64;
-        for key in keys_to_delete {
-            objects.remove(&key);
-        }
+        let mut count: u64 = 0;
+        self.objects.retain(|k, _| {
+            if k.starts_with(prefix) {
+                count += 1;
+                false
+            } else {
+                true
+            }
+        });
         Ok(count)
     }
 
     async fn list_objects(&self, prefix: &str) -> Result<Vec<ObjectInfo>, StorageError> {
-        let objects = self.objects.read().await;
-        let mut result: Vec<ObjectInfo> = objects
+        let mut result: Vec<ObjectInfo> = self
+            .objects
             .iter()
-            .filter(|(k, _)| k.starts_with(prefix))
-            .map(|(k, v)| ObjectInfo {
-                key: k.clone(),
-                size: v.data.len() as u64,
-                last_modified: v.created_at,
+            .filter(|r| r.key().starts_with(prefix))
+            .map(|r| ObjectInfo {
+                key: r.key().clone(),
+                size: r.value().data.len() as u64,
+                last_modified: r.value().created_at,
             })
             .collect();
         result.sort_by(|a, b| a.key.cmp(&b.key));
@@ -172,8 +171,7 @@ impl MediaStore for InMemoryMediaStore {
             path: path.to_string(),
             reason: format!("failed to serialize metadata: {}", e),
         })?;
-        let mut objects = self.objects.write().await;
-        objects.insert(
+        self.objects.insert(
             path.to_string(),
             StoredObject {
                 data: Bytes::from(json),
@@ -185,11 +183,13 @@ impl MediaStore for InMemoryMediaStore {
     }
 
     async fn head_object(&self, path: &str) -> Result<super::ObjectMeta, StorageError> {
-        let objects = self.objects.read().await;
-        let obj = objects.get(path).ok_or_else(|| StorageError::S3GetFailed {
-            path: path.to_string(),
-            reason: "not found".to_string(),
-        })?;
+        let obj = self
+            .objects
+            .get(path)
+            .ok_or_else(|| StorageError::S3GetFailed {
+                path: path.to_string(),
+                reason: "not found".to_string(),
+            })?;
         Ok(super::ObjectMeta {
             content_length: obj.data.len() as u64,
             content_type: obj.content_type.clone(),
@@ -201,12 +201,12 @@ impl MediaStore for InMemoryMediaStore {
 
 #[cfg(test)]
 impl InMemoryMediaStore {
-    pub async fn object_count(&self) -> usize {
-        self.objects.read().await.len()
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
     }
 
-    pub async fn exists(&self, path: &str) -> bool {
-        self.objects.read().await.contains_key(path)
+    pub fn exists(&self, path: &str) -> bool {
+        self.objects.contains_key(path)
     }
 }
 
@@ -278,9 +278,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.exists("test.m4s").await);
+        assert!(store.exists("test.m4s"));
         store.delete_object("test.m4s").await.unwrap();
-        assert!(!store.exists("test.m4s").await);
+        assert!(!store.exists("test.m4s"));
     }
 
     #[tokio::test]
@@ -301,7 +301,7 @@ mod tests {
 
         let deleted = store.delete_prefix("stream1/").await.unwrap();
         assert_eq!(deleted, 2);
-        assert_eq!(store.object_count().await, 1);
+        assert_eq!(store.object_count(), 1);
     }
 
     #[tokio::test]

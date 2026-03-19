@@ -30,7 +30,7 @@ services:
       - STREAMINFA_STORAGE_SECRET_ACCESS_KEY=minioadmin
       - STREAMINFA_STORAGE_REGION=us-east-1
       - STREAMINFA_STORAGE_PATH_STYLE=true
-      - STREAMINFA_OBSERVABILITY_LOG_LEVEL=debug
+      - STREAMINFA_OBSERVABILITY_LOG_LEVEL=info
       - STREAMINFA_OBSERVABILITY_LOG_FORMAT=pretty
       - STREAMINFA_AUTH_ADMIN_BEARER_TOKENS=at_dev_token_for_local_testing_only
     volumes:
@@ -114,18 +114,6 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
 
-  # --------------------------------------------------------
-  # Jaeger — distributed tracing
-  # (from docker.md §2.1)
-  # --------------------------------------------------------
-  jaeger:
-    image: jaegertracing/all-in-one:1.56
-    ports:
-      - "16686:16686"  # Jaeger UI
-      - "4317:4317"    # OTLP gRPC
-      - "4318:4318"    # OTLP HTTP
-    environment:
-      - COLLECTOR_OTLP_ENABLED=true
 
 volumes:
   minio-data:

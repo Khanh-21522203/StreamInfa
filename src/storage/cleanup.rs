@@ -312,7 +312,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(store.exists(&seg_key).await);
+        assert!(store.exists(&seg_key));
     }
 
     #[tokio::test]
@@ -348,6 +348,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!store.exists(&seg_key).await);
+        assert!(!store.exists(&seg_key));
     }
 }

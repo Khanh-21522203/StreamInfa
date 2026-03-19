@@ -1,66 +1,57 @@
 # ============================================================
-# Stage 1: Install pre-built FFmpeg packages
+# Stage 1: Build StreamInfa with FFmpeg + S3 support
 # ============================================================
-FROM ubuntu:22.04 AS ffmpeg-builder
+FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
+    pkg-config \
+    clang \
     libavcodec-dev \
     libavformat-dev \
     libavutil-dev \
+    libavfilter-dev \
+    libavdevice-dev \
     libswscale-dev \
-    libx264-dev \
-    libfdk-aac-dev \
-    pkg-config \
     && rm -rf /var/lib/apt/lists/*
-
-# ============================================================
-# Stage 2: Build StreamInfa Rust binary
-# ============================================================
-FROM rust:1.82-bookworm AS rust-builder
 
 WORKDIR /app
 
-# Cache dependencies: copy only Cargo files first
+# Fetch dependencies first (cache layer)
 COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src benches \
+    && echo 'fn main() {}' > src/main.rs \
+    && echo 'fn main() {}' > benches/pipeline_micro.rs \
+    && cargo fetch
 
-# Create dummy src to cache dependency compilation
-RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
-
-RUN cargo build --release 2>/dev/null || true
-
-# Now copy actual source and rebuild
+# Build with real source
 COPY src/ src/
+COPY benches/ benches/
 COPY config/ config/
-
-# Touch source files to invalidate the dummy build
-RUN find src/ -name "*.rs" -exec touch {} +
-
-RUN cargo build --release --bin streaminfa
+RUN find src/ benches/ -name "*.rs" -exec touch {} +
+RUN cargo build --release --bin streaminfa --features s3,ffmpeg
 
 # Strip debug symbols
 RUN strip /app/target/release/streaminfa
 
 # ============================================================
-# Stage 3: Minimal runtime image
+# Stage 2: Minimal runtime image
 # (from docker.md §1.2)
 # Target size: < 200 MB
 # ============================================================
-FROM ubuntu:22.04 AS runtime
+FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    libx264-163 \
-    libfdk-aac2 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy StreamInfa binary
-COPY --from=rust-builder /app/target/release/streaminfa /usr/local/bin/streaminfa
+COPY --from=builder /app/target/release/streaminfa /usr/local/bin/streaminfa
 
 WORKDIR /app
 
-# Copy default configuration  
+# Copy default configuration
 COPY config/default.toml /app/config/default.toml
 
 # Create non-root user (from security best practices)
@@ -81,4 +72,3 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8080/healthz || exit 1
 
 ENTRYPOINT ["streaminfa"]
-CMD ["--config", "/app/config/default.toml"]

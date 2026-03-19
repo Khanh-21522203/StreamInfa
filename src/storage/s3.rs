@@ -46,6 +46,7 @@ impl S3MediaStore {
         );
 
         let mut s3_config_builder = aws_sdk_s3::Config::builder()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
             .region(Region::new(config.region.clone()))
             .credentials_provider(credentials)
             .force_path_style(config.path_style);
@@ -309,6 +310,8 @@ impl MediaStore for S3MediaStore {
     }
 
     async fn delete_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
+        use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+
         let mut deleted_count: u64 = 0;
         let mut continuation_token: Option<String> = None;
 
@@ -328,17 +331,43 @@ impl MediaStore for S3MediaStore {
                 reason: e.to_string(),
             })?;
 
+            let is_truncated = output.is_truncated.unwrap_or(false);
+            let next_token = output.next_continuation_token.clone();
+
             if let Some(contents) = output.contents {
-                for obj in &contents {
-                    if let Some(key) = &obj.key {
-                        self.delete_object(key).await?;
-                        deleted_count += 1;
-                    }
+                let keys: Vec<ObjectIdentifier> = contents
+                    .into_iter()
+                    .filter_map(|obj| obj.key)
+                    .filter_map(|key| ObjectIdentifier::builder().key(key).build().ok())
+                    .collect();
+
+                if !keys.is_empty() {
+                    let batch_len = keys.len() as u64;
+                    let delete = Delete::builder()
+                        .set_objects(Some(keys))
+                        .build()
+                        .map_err(|e| StorageError::S3DeleteFailed {
+                            path: prefix.to_string(),
+                            reason: e.to_string(),
+                        })?;
+
+                    self.client
+                        .delete_objects()
+                        .bucket(&self.bucket)
+                        .delete(delete)
+                        .send()
+                        .await
+                        .map_err(|e| StorageError::S3DeleteFailed {
+                            path: prefix.to_string(),
+                            reason: e.to_string(),
+                        })?;
+
+                    deleted_count += batch_len;
                 }
             }
 
-            if output.is_truncated.unwrap_or(false) {
-                continuation_token = output.next_continuation_token;
+            if is_truncated {
+                continuation_token = next_token;
             } else {
                 break;
             }

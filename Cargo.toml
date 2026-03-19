@@ -50,6 +50,9 @@ aws-smithy-types = { version = "1", optional = true }
 # In-memory LRU cache
 lru = "0.12"
 
+# Fast non-poisoning mutex (replaces std::sync::Mutex in hot paths)
+parking_lot = "0.12"
+
 # Concurrent hash map (for stream state)
 dashmap = "6"
 

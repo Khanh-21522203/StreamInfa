@@ -170,29 +170,28 @@ pub fn describe_all_metrics() {
 
 // -- Ingest --
 
-pub fn inc_ingest_active_streams(protocol: &str) {
-    gauge!("streaminfa_ingest_active_streams", "protocol" => protocol.to_string()).increment(1.0);
+pub fn inc_ingest_active_streams(protocol: &'static str) {
+    gauge!("streaminfa_ingest_active_streams", "protocol" => protocol).increment(1.0);
 }
 
-pub fn dec_ingest_active_streams(protocol: &str) {
-    gauge!("streaminfa_ingest_active_streams", "protocol" => protocol.to_string()).decrement(1.0);
+pub fn dec_ingest_active_streams(protocol: &'static str) {
+    gauge!("streaminfa_ingest_active_streams", "protocol" => protocol).decrement(1.0);
 }
 
-pub fn inc_ingest_connections(protocol: &str) {
-    counter!("streaminfa_ingest_connections_total", "protocol" => protocol.to_string())
-        .increment(1);
+pub fn inc_ingest_connections(protocol: &'static str) {
+    counter!("streaminfa_ingest_connections_total", "protocol" => protocol).increment(1);
 }
 
-pub fn add_ingest_bytes(protocol: &str, stream_id: &str, bytes: u64) {
-    counter!("streaminfa_ingest_bytes_total", "protocol" => protocol.to_string(), "stream_id" => stream_id.to_string()).increment(bytes);
+pub fn add_ingest_bytes(protocol: &'static str, stream_id: &str, bytes: u64) {
+    counter!("streaminfa_ingest_bytes_total", "protocol" => protocol, "stream_id" => stream_id.to_string()).increment(bytes);
 }
 
-pub fn inc_ingest_frames(stream_id: &str, track: &str) {
-    counter!("streaminfa_ingest_frames_total", "stream_id" => stream_id.to_string(), "track" => track.to_string()).increment(1);
+pub fn inc_ingest_frames(stream_id: &str, track: &'static str) {
+    counter!("streaminfa_ingest_frames_total", "stream_id" => stream_id.to_string(), "track" => track).increment(1);
 }
 
-pub fn inc_ingest_error(protocol: &str, error_type: &str) {
-    counter!("streaminfa_ingest_errors_total", "protocol" => protocol.to_string(), "error_type" => error_type.to_string()).increment(1);
+pub fn inc_ingest_error(protocol: &'static str, error_type: &'static str) {
+    counter!("streaminfa_ingest_errors_total", "protocol" => protocol, "error_type" => error_type).increment(1);
 }
 
 pub fn set_ingest_bitrate(stream_id: &str, bps: f64) {
@@ -221,29 +220,29 @@ pub fn dec_transcode_active_jobs() {
     gauge!("streaminfa_transcode_active_jobs").decrement(1.0);
 }
 
-pub fn inc_transcode_segments(stream_id: &str, rendition: &str) {
-    counter!("streaminfa_transcode_segments_total", "stream_id" => stream_id.to_string(), "rendition" => rendition.to_string()).increment(1);
+pub fn inc_transcode_segments(stream_id: &str, rendition: &'static str) {
+    counter!("streaminfa_transcode_segments_total", "stream_id" => stream_id.to_string(), "rendition" => rendition).increment(1);
 }
 
-pub fn record_transcode_segment_duration(rendition: &str, seconds: f64) {
-    histogram!("streaminfa_transcode_segment_duration_seconds", "rendition" => rendition.to_string()).record(seconds);
-}
-
-pub fn record_transcode_latency(rendition: &str, seconds: f64) {
-    histogram!("streaminfa_transcode_latency_seconds", "rendition" => rendition.to_string())
+pub fn record_transcode_segment_duration(rendition: &'static str, seconds: f64) {
+    histogram!("streaminfa_transcode_segment_duration_seconds", "rendition" => rendition)
         .record(seconds);
 }
 
-pub fn set_transcode_fps(stream_id: &str, rendition: &str, fps: f64) {
-    gauge!("streaminfa_transcode_fps", "stream_id" => stream_id.to_string(), "rendition" => rendition.to_string()).set(fps);
+pub fn record_transcode_latency(rendition: &'static str, seconds: f64) {
+    histogram!("streaminfa_transcode_latency_seconds", "rendition" => rendition).record(seconds);
+}
+
+pub fn set_transcode_fps(stream_id: &str, rendition: &'static str, fps: f64) {
+    gauge!("streaminfa_transcode_fps", "stream_id" => stream_id.to_string(), "rendition" => rendition).set(fps);
 }
 
 pub fn set_transcode_queue_depth(stream_id: &str, depth: f64) {
     gauge!("streaminfa_transcode_queue_depth", "stream_id" => stream_id.to_string()).set(depth);
 }
 
-pub fn inc_transcode_error(stream_id: &str, error_type: &str) {
-    counter!("streaminfa_transcode_errors_total", "stream_id" => stream_id.to_string(), "error_type" => error_type.to_string()).increment(1);
+pub fn inc_transcode_error(stream_id: &str, error_type: &'static str) {
+    counter!("streaminfa_transcode_errors_total", "stream_id" => stream_id.to_string(), "error_type" => error_type).increment(1);
 }
 
 pub fn set_vod_progress(stream_id: &str, percent: f64) {
@@ -252,60 +251,56 @@ pub fn set_vod_progress(stream_id: &str, percent: f64) {
 
 // -- Packaging --
 
-pub fn inc_package_segments_written(stream_id: &str, rendition: &str) {
-    counter!("streaminfa_package_segments_written_total", "stream_id" => stream_id.to_string(), "rendition" => rendition.to_string()).increment(1);
+pub fn inc_package_segments_written(stream_id: &str, rendition: &'static str) {
+    counter!("streaminfa_package_segments_written_total", "stream_id" => stream_id.to_string(), "rendition" => rendition).increment(1);
 }
 
-pub fn inc_package_manifest_updates(stream_id: &str, rendition: &str) {
-    counter!("streaminfa_package_manifest_updates_total", "stream_id" => stream_id.to_string(), "rendition" => rendition.to_string()).increment(1);
+pub fn inc_package_manifest_updates(stream_id: &str, rendition: &'static str) {
+    counter!("streaminfa_package_manifest_updates_total", "stream_id" => stream_id.to_string(), "rendition" => rendition).increment(1);
 }
 
-pub fn record_package_mux_duration(rendition: &str, seconds: f64) {
-    histogram!("streaminfa_package_mux_duration_seconds", "rendition" => rendition.to_string())
-        .record(seconds);
+pub fn record_package_mux_duration(rendition: &'static str, seconds: f64) {
+    histogram!("streaminfa_package_mux_duration_seconds", "rendition" => rendition).record(seconds);
 }
 
 // -- Storage --
 
-pub fn record_storage_put_duration(object_type: &str, seconds: f64) {
-    histogram!("streaminfa_storage_put_duration_seconds", "object_type" => object_type.to_string())
+pub fn record_storage_put_duration(object_type: &'static str, seconds: f64) {
+    histogram!("streaminfa_storage_put_duration_seconds", "object_type" => object_type)
         .record(seconds);
 }
 
-pub fn record_storage_get_duration(object_type: &str, seconds: f64) {
-    histogram!("streaminfa_storage_get_duration_seconds", "object_type" => object_type.to_string())
+pub fn record_storage_get_duration(object_type: &'static str, seconds: f64) {
+    histogram!("streaminfa_storage_get_duration_seconds", "object_type" => object_type)
         .record(seconds);
 }
 
-pub fn add_storage_put_bytes(object_type: &str, bytes: u64) {
-    counter!("streaminfa_storage_put_bytes_total", "object_type" => object_type.to_string())
-        .increment(bytes);
+pub fn add_storage_put_bytes(object_type: &'static str, bytes: u64) {
+    counter!("streaminfa_storage_put_bytes_total", "object_type" => object_type).increment(bytes);
 }
 
-pub fn add_storage_get_bytes(object_type: &str, bytes: u64) {
-    counter!("streaminfa_storage_get_bytes_total", "object_type" => object_type.to_string())
-        .increment(bytes);
+pub fn add_storage_get_bytes(object_type: &'static str, bytes: u64) {
+    counter!("streaminfa_storage_get_bytes_total", "object_type" => object_type).increment(bytes);
 }
 
-pub fn inc_storage_error(operation: &str, error_type: &str) {
-    counter!("streaminfa_storage_errors_total", "operation" => operation.to_string(), "error_type" => error_type.to_string()).increment(1);
+pub fn inc_storage_error(operation: &'static str, error_type: &'static str) {
+    counter!("streaminfa_storage_errors_total", "operation" => operation, "error_type" => error_type).increment(1);
 }
 
-pub fn inc_storage_retries(operation: &str) {
-    counter!("streaminfa_storage_retries_total", "operation" => operation.to_string()).increment(1);
+pub fn inc_storage_retries(operation: &'static str) {
+    counter!("streaminfa_storage_retries_total", "operation" => operation).increment(1);
 }
 
 pub fn inc_storage_segments_deleted() {
     counter!("streaminfa_storage_segments_deleted_total").increment(1);
 }
 
-pub fn inc_cache_hit(object_type: &str) {
-    counter!("streaminfa_cache_hits_total", "object_type" => object_type.to_string()).increment(1);
+pub fn inc_cache_hit(object_type: &'static str) {
+    counter!("streaminfa_cache_hits_total", "object_type" => object_type).increment(1);
 }
 
-pub fn inc_cache_miss(object_type: &str) {
-    counter!("streaminfa_cache_misses_total", "object_type" => object_type.to_string())
-        .increment(1);
+pub fn inc_cache_miss(object_type: &'static str) {
+    counter!("streaminfa_cache_misses_total", "object_type" => object_type).increment(1);
 }
 
 pub fn set_cache_size_bytes(bytes: f64) {
@@ -318,12 +313,13 @@ pub fn set_cache_entries(count: f64) {
 
 // -- Delivery --
 
-pub fn inc_delivery_request(status: &str, object_type: &str) {
-    counter!("streaminfa_delivery_requests_total", "status" => status.to_string(), "object_type" => object_type.to_string()).increment(1);
+pub fn inc_delivery_request(status: &'static str, object_type: &'static str) {
+    counter!("streaminfa_delivery_requests_total", "status" => status, "object_type" => object_type).increment(1);
 }
 
-pub fn record_delivery_request_duration(object_type: &str, seconds: f64) {
-    histogram!("streaminfa_delivery_request_duration_seconds", "object_type" => object_type.to_string()).record(seconds);
+pub fn record_delivery_request_duration(object_type: &'static str, seconds: f64) {
+    histogram!("streaminfa_delivery_request_duration_seconds", "object_type" => object_type)
+        .record(seconds);
 }
 
 pub fn add_delivery_bytes_sent(bytes: u64) {
@@ -356,20 +352,20 @@ pub fn inc_panic_total() {
     counter!("streaminfa_panic_total").increment(1);
 }
 
-pub fn inc_config_reload(result: &str) {
-    counter!("streaminfa_config_reload_total", "result" => result.to_string()).increment(1);
+pub fn inc_config_reload(result: &'static str) {
+    counter!("streaminfa_config_reload_total", "result" => result).increment(1);
 }
 
 pub fn set_shutdown_in_progress(in_progress: bool) {
     gauge!("streaminfa_shutdown_in_progress").set(if in_progress { 1.0 } else { 0.0 });
 }
 
-pub fn inc_auth_failure(protocol: &str, endpoint: &str, reason: &str) {
+pub fn inc_auth_failure(protocol: &'static str, endpoint: &'static str, reason: &'static str) {
     counter!(
         "streaminfa_auth_failures_total",
-        "protocol" => protocol.to_string(),
-        "endpoint" => endpoint.to_string(),
-        "reason" => reason.to_string()
+        "protocol" => protocol,
+        "endpoint" => endpoint,
+        "reason" => reason
     )
     .increment(1);
 }
@@ -379,15 +375,16 @@ pub fn inc_auth_failure(protocol: &str, endpoint: &str, reason: &str) {
 /// Counter/histogram series cannot be deleted through the generic `metrics` facade,
 /// so we normalize per-stream gauges back to zero when streams complete/delete.
 pub fn clear_stream_metrics(stream_id: &str) {
-    gauge!("streaminfa_ingest_bitrate_bps", "stream_id" => stream_id.to_string()).set(0.0);
-    gauge!("streaminfa_transcode_queue_depth", "stream_id" => stream_id.to_string()).set(0.0);
-    gauge!("streaminfa_vod_progress_percent", "stream_id" => stream_id.to_string()).set(0.0);
-    gauge!("streaminfa_ingest_channel_utilization", "stream_id" => stream_id.to_string()).set(0.0);
+    let sid = stream_id.to_string();
+    gauge!("streaminfa_ingest_bitrate_bps", "stream_id" => sid.clone()).set(0.0);
+    gauge!("streaminfa_transcode_queue_depth", "stream_id" => sid.clone()).set(0.0);
+    gauge!("streaminfa_vod_progress_percent", "stream_id" => sid.clone()).set(0.0);
+    gauge!("streaminfa_ingest_channel_utilization", "stream_id" => sid.clone()).set(0.0);
     for rendition in ["high", "medium", "low", "source"] {
         gauge!(
             "streaminfa_transcode_fps",
-            "stream_id" => stream_id.to_string(),
-            "rendition" => rendition.to_string()
+            "stream_id" => sid.clone(),
+            "rendition" => rendition
         )
         .set(0.0);
     }

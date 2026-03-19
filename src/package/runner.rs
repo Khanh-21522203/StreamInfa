@@ -41,6 +41,8 @@ pub async fn run_packager(
     let mut indexes: HashMap<RenditionId, SegmentIndex> = HashMap::new();
     let mut rendition_infos: Vec<RenditionInfo> = Vec::new();
     let mut init_segments_written: HashMap<RenditionId, bool> = HashMap::new();
+    let mut last_master_rendition_count: usize = 0;
+    let stream_id_str = stream_id.to_string();
     let segment_window = if is_vod {
         usize::MAX
     } else {
@@ -96,7 +98,7 @@ pub async fn run_packager(
             match hls::generate_init_segment(&init_params) {
                 Ok(init_data) => {
                     let init_path =
-                        manifest::init_segment_path(&stream_id.to_string(), &rendition.to_string());
+                        manifest::init_segment_path(&stream_id_str, rendition.as_str());
                     let write = StorageWrite {
                         path: init_path,
                         data: init_data,
@@ -135,11 +137,14 @@ pub async fn run_packager(
                 has_audio: segment.audio_data.is_some(),
             });
 
-            // Publish/update master playlist as soon as renditions become known.
-            if let Err(e) =
-                write_master_playlist(stream_id, &config, &rendition_infos, &storage_tx).await
-            {
-                warn!(%stream_id, error = %e, "failed to publish master playlist");
+            // Publish/update master playlist only when a new rendition is added.
+            if rendition_infos.len() > last_master_rendition_count {
+                if let Err(e) =
+                    write_master_playlist(stream_id, &config, &rendition_infos, &storage_tx).await
+                {
+                    warn!(%stream_id, error = %e, "failed to publish master playlist");
+                }
+                last_master_rendition_count = rendition_infos.len();
             }
         }
 
@@ -167,12 +172,12 @@ pub async fn run_packager(
         match hls::generate_media_segment(&media_params) {
             Ok(segment_data) => {
                 obs::record_package_mux_duration(
-                    &rendition.to_string(),
+                    rendition.as_str(),
                     mux_start.elapsed().as_secs_f64(),
                 );
                 let seg_path = manifest::segment_path(
-                    &stream_id.to_string(),
-                    &rendition.to_string(),
+                    &stream_id_str,
+                    rendition.as_str(),
                     sequence,
                 );
                 let segment_size = segment_data.len() as u64;
@@ -198,13 +203,13 @@ pub async fn run_packager(
                 // Update segment index
                 index.add_segment(segment.duration_secs, seg_path, segment_size);
 
-                obs::inc_package_segments_written(&stream_id.to_string(), &rendition.to_string());
+                obs::inc_package_segments_written(&stream_id_str, rendition.as_str());
 
                 // Generate and write updated media playlist
                 let playlist_content =
                     index.generate_playlist(config.hls_version, is_vod, segment.is_last);
                 let playlist_path =
-                    manifest::media_playlist_path(&stream_id.to_string(), &rendition.to_string());
+                    manifest::media_playlist_path(&stream_id_str, rendition.as_str());
                 let playlist_write = StorageWrite {
                     path: playlist_path,
                     data: Bytes::from(playlist_content),
@@ -223,7 +228,7 @@ pub async fn run_packager(
                     break;
                 }
 
-                obs::inc_package_manifest_updates(&stream_id.to_string(), &rendition.to_string());
+                obs::inc_package_manifest_updates(&stream_id_str, rendition.as_str());
 
                 // Emit SegmentProduced event
                 let _ = event_tx

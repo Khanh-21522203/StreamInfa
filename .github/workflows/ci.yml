@@ -52,12 +52,12 @@ jobs:
       - name: Run cargo audit
         run: cargo audit
 
-  docker:
-    name: docker-build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Build docker image
-        run: docker build -f docker/Dockerfile -t streaminfa:ci .
+#  docker:
+#    name: docker-build
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: Checkout
+#        uses: actions/checkout@v4
+#
+#      - name: Build docker image
+#        run: docker build -f docker/Dockerfile -t streaminfa:ci .

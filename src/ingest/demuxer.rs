@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use tracing::{debug, warn};
 
 use crate::core::error::IngestError;
@@ -183,22 +183,27 @@ impl FlvDemuxer {
 
                 // Extract NALUs (length-prefixed, 4-byte big-endian)
                 let nalu_data = &data[5..];
-                let (keyframe, mut nalu_bytes) = self.extract_nalus(nalu_data)?;
+                let (keyframe, nalu_bytes) = self.extract_nalus(nalu_data)?;
                 let is_keyframe = keyframe || frame_type == 1;
 
                 // Ensure keyframes carry SPS/PPS so downstream packagers can derive init metadata.
-                if is_keyframe {
+                let frame_data: Bytes = if is_keyframe {
                     if let (Some(sps), Some(pps)) = (&self.sps, &self.pps) {
-                        let mut prefixed =
-                            Vec::with_capacity(4 + sps.len() + 4 + pps.len() + nalu_bytes.len());
-                        prefixed.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-                        prefixed.extend_from_slice(sps);
-                        prefixed.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
-                        prefixed.extend_from_slice(pps);
-                        prefixed.extend_from_slice(&nalu_bytes);
-                        nalu_bytes = prefixed;
+                        let mut buf = BytesMut::with_capacity(
+                            4 + sps.len() + 4 + pps.len() + nalu_bytes.len(),
+                        );
+                        buf.put_slice(&[0x00, 0x00, 0x00, 0x01]);
+                        buf.put_slice(sps);
+                        buf.put_slice(&[0x00, 0x00, 0x00, 0x01]);
+                        buf.put_slice(pps);
+                        buf.put_slice(&nalu_bytes);
+                        buf.freeze()
+                    } else {
+                        Bytes::from(nalu_bytes)
                     }
-                }
+                } else {
+                    Bytes::from(nalu_bytes)
+                };
 
                 // Timestamp normalization: FLV ms → 90kHz
                 let pts_90k = (timestamp_ms as i64 + cts as i64) * 90;
@@ -218,7 +223,7 @@ impl FlvDemuxer {
                     pts: pts_90k,
                     dts: dts_90k,
                     keyframe: is_keyframe,
-                    data: Bytes::from(nalu_bytes),
+                    data: frame_data,
                 }))
             }
             _ => Ok(None), // End of sequence or unknown

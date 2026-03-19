@@ -1,17 +1,13 @@
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use lru::LruCache;
+use parking_lot::Mutex;
 use tracing::{debug, trace};
 
 use crate::core::config::CacheConfig;
 use crate::observability::metrics as obs;
-
-// ---------------------------------------------------------------------------
-// LRU Cache (from storage-and-delivery.md §5)
-// ---------------------------------------------------------------------------
 
 /// A cached object with its metadata and expiry time.
 #[derive(Debug, Clone)]
@@ -30,6 +26,12 @@ impl CacheEntry {
     }
 }
 
+/// Combined cache state protected by a single lock.
+struct CacheInner {
+    lru: LruCache<String, CacheEntry>,
+    current_size: u64,
+}
+
 /// In-memory LRU cache for frequently accessed storage objects.
 ///
 /// Design (from storage-and-delivery.md §5.1):
@@ -38,9 +40,8 @@ impl CacheEntry {
 /// - Write-through invalidation: packager invalidates on manifest update
 /// - LRU eviction when capacity reached
 pub struct ObjectCache {
-    cache: Mutex<LruCache<String, CacheEntry>>,
+    inner: Mutex<CacheInner>,
     config: CacheConfig,
-    current_size: Mutex<u64>,
 }
 
 impl ObjectCache {
@@ -49,9 +50,11 @@ impl ObjectCache {
         // SAFETY: 100_000 is always non-zero
         let cap = NonZeroUsize::new(100_000).expect("cache capacity must be non-zero");
         Self {
-            cache: Mutex::new(LruCache::new(cap)),
+            inner: Mutex::new(CacheInner {
+                lru: LruCache::new(cap),
+                current_size: 0,
+            }),
             config: config.clone(),
-            current_size: Mutex::new(0),
         }
     }
 
@@ -59,14 +62,13 @@ impl ObjectCache {
     ///
     /// Returns `Some((data, content_type, etag))` on hit, `None` on miss.
     pub fn get(&self, key: &str) -> Option<(Bytes, String, String)> {
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
 
-        if let Some(entry) = cache.get(key) {
+        if let Some(entry) = inner.lru.get(key) {
             if entry.is_expired() {
                 // TTL expired — remove and return miss
-                let entry = cache.pop(key)?;
-                let mut size = self.current_size.lock().unwrap_or_else(|e| e.into_inner());
-                *size = size.saturating_sub(entry.size);
+                let entry = inner.lru.pop(key)?;
+                inner.current_size = inner.current_size.saturating_sub(entry.size);
                 trace!(key, "cache entry expired");
                 return None;
             }
@@ -107,29 +109,28 @@ impl ObjectCache {
             size: entry_size,
         };
 
-        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-        let mut current_size = self.current_size.lock().unwrap_or_else(|e| e.into_inner());
+        let mut inner = self.inner.lock();
 
         // Evict until we have room
-        while *current_size + entry_size > self.config.max_size_bytes {
-            if let Some((_evicted_key, evicted)) = cache.pop_lru() {
-                *current_size = current_size.saturating_sub(evicted.size);
+        while inner.current_size + entry_size > self.config.max_size_bytes {
+            if let Some((_evicted_key, evicted)) = inner.lru.pop_lru() {
+                inner.current_size = inner.current_size.saturating_sub(evicted.size);
             } else {
                 break;
             }
         }
 
         // Remove old entry if replacing
-        if let Some(old) = cache.pop(key) {
-            *current_size = current_size.saturating_sub(old.size);
+        if let Some(old) = inner.lru.pop(key) {
+            inner.current_size = inner.current_size.saturating_sub(old.size);
         }
 
-        cache.put(key.to_string(), entry);
-        *current_size += entry_size;
+        inner.lru.put(key.to_string(), entry);
+        inner.current_size += entry_size;
 
         // Update cache metrics
-        obs::set_cache_size_bytes(*current_size as f64);
-        obs::set_cache_entries(cache.len() as f64);
+        obs::set_cache_size_bytes(inner.current_size as f64);
+        obs::set_cache_entries(inner.lru.len() as f64);
 
         debug!(key, size = entry_size, "cached object");
     }
@@ -160,19 +161,18 @@ impl ObjectCache {
 #[cfg(test)]
 impl ObjectCache {
     pub fn invalidate(&self, key: &str) {
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(entry) = cache.pop(key) {
-            let mut size = self.current_size.lock().unwrap();
-            *size = size.saturating_sub(entry.size);
+        let mut inner = self.inner.lock();
+        if let Some(entry) = inner.lru.pop(key) {
+            inner.current_size = inner.current_size.saturating_sub(entry.size);
         }
     }
 
     pub fn entry_count(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        self.inner.lock().lru.len()
     }
 
     pub fn current_size_bytes(&self) -> u64 {
-        *self.current_size.lock().unwrap()
+        self.inner.lock().current_size
     }
 }
 

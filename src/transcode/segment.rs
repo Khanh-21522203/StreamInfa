@@ -1,6 +1,23 @@
+use std::sync::Arc;
+
 use bytes::{Bytes, BytesMut};
 
 use crate::core::types::{EncodedSegment, RenditionId, StreamId};
+
+/// Pre-compute BytesMut capacity for one segment based on rendition bitrates and target duration.
+///
+/// Adds 10% headroom over the theoretical byte count to avoid a single reallocation
+/// at the segment boundary when the encoder slightly overshoots the target bitrate.
+fn segment_buffer_capacity(
+    video_bitrate_kbps: u32,
+    audio_bitrate_kbps: u32,
+    duration_secs: f64,
+) -> (usize, usize) {
+    let video = ((video_bitrate_kbps as f64 * 1024.0 / 8.0) * duration_secs * 1.1) as usize;
+    let audio = ((audio_bitrate_kbps as f64 * 1024.0 / 8.0) * duration_secs * 1.1) as usize;
+    // Floor at 4 KB so zero-bitrate renditions still avoid early realloc
+    (video.max(4096), audio.max(4096))
+}
 
 // ---------------------------------------------------------------------------
 // Segment boundary detection (from transcoding-and-packaging.md §4.2)
@@ -61,9 +78,9 @@ pub struct SegmentAccumulator {
     /// Audio bitrate in kbps.
     audio_bitrate_kbps: u32,
     /// H.264 profile name.
-    profile: String,
+    profile: Arc<str>,
     /// H.264 level.
-    level: String,
+    level: Arc<str>,
     /// Source frame rate.
     frame_rate: f64,
 }
@@ -78,16 +95,18 @@ impl SegmentAccumulator {
         height: u32,
         video_bitrate_kbps: u32,
         audio_bitrate_kbps: u32,
-        profile: String,
-        level: String,
+        profile: Arc<str>,
+        level: Arc<str>,
         frame_rate: f64,
     ) -> Self {
+        let (video_cap, audio_cap) =
+            segment_buffer_capacity(video_bitrate_kbps, audio_bitrate_kbps, target_duration_secs);
         Self {
             stream_id,
             rendition,
             target_duration_secs,
-            video_buffer: BytesMut::new(),
-            audio_buffer: BytesMut::new(),
+            video_buffer: BytesMut::with_capacity(video_cap),
+            audio_buffer: BytesMut::with_capacity(audio_cap),
             segment_start_pts: None,
             segment_keyframe_pts: None,
             last_pts: 0,
@@ -172,10 +191,18 @@ impl SegmentAccumulator {
             frame_rate: self.frame_rate,
         };
 
-        // Reset for next segment
+        // Reset for next segment; pre-reserve capacity so the next segment's
+        // accumulation doesn't trigger reallocs from zero.
         self.next_sequence += 1;
         self.segment_start_pts = None;
         self.segment_keyframe_pts = None;
+        let (video_cap, audio_cap) = segment_buffer_capacity(
+            self.video_bitrate_kbps,
+            self.audio_bitrate_kbps,
+            self.target_duration_secs,
+        );
+        self.video_buffer.reserve(video_cap);
+        self.audio_buffer.reserve(audio_cap);
 
         segment
     }
@@ -205,8 +232,8 @@ mod tests {
             1080,
             3500,
             128,
-            "high".to_string(),
-            "4.1".to_string(),
+            Arc::from("high"),
+            Arc::from("4.1"),
             30.0,
         );
 
@@ -241,8 +268,8 @@ mod tests {
             480,
             1000,
             96,
-            "main".to_string(),
-            "3.0".to_string(),
+            Arc::from("main"),
+            Arc::from("3.0"),
             30.0,
         );
 
@@ -263,8 +290,8 @@ mod tests {
             720,
             2000,
             128,
-            "main".to_string(),
-            "3.1".to_string(),
+            Arc::from("main"),
+            Arc::from("3.1"),
             30.0,
         );
 
@@ -286,8 +313,8 @@ mod tests {
             1080,
             3500,
             128,
-            "high".to_string(),
-            "4.1".to_string(),
+            Arc::from("high"),
+            Arc::from("4.1"),
             30.0,
         );
 
@@ -314,8 +341,8 @@ mod tests {
             1080,
             3500,
             128,
-            "high".to_string(),
-            "4.1".to_string(),
+            Arc::from("high"),
+            Arc::from("4.1"),
             30.0,
         );
 
@@ -339,8 +366,8 @@ mod tests {
             1080,
             3500,
             128,
-            "high".to_string(),
-            "4.1".to_string(),
+            Arc::from("high"),
+            Arc::from("4.1"),
             30.0,
         );
 
