@@ -176,7 +176,12 @@ run_k6() {
     fi
 
     require_cmd docker
-    docker run --rm -i \
+    local docker_network="${K6_DOCKER_NETWORK:-}"
+    local -a network_arg=()
+    if [[ -n "${docker_network}" ]]; then
+        network_arg=(--network "${docker_network}")
+    fi
+    docker run --rm -i "${network_arg[@]}" \
         -e BASE_URL="${BASE_URL}" \
         -e DURATION="${CAPACITY_DURATION}" \
         -e CAPACITY_DURATION="${CAPACITY_DURATION}" \
