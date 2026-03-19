@@ -480,7 +480,7 @@ impl RtmpConnection {
         response.put_u32(0); // timestamp
         response.put_u32(0); // zero
         response.put_bytes(0xAB, HANDSHAKE_SIZE - 8); // random fill
-                                                                       // S2: echo C1
+                                                      // S2: echo C1
         response.extend_from_slice(&c1);
         socket.write_all(&response).await?;
         socket.flush().await?;
@@ -638,11 +638,7 @@ impl RtmpConnection {
                                 "video"
                             };
                             obs::inc_ingest_frames(&stream_id_str, track_label);
-                            obs::add_ingest_bytes(
-                                "rtmp",
-                                &stream_id_str,
-                                frame.data.len() as u64,
-                            );
+                            obs::add_ingest_bytes("rtmp", &stream_id_str, frame.data.len() as u64);
                             // Send to transcode pipeline with backpressure metrics
                             // (performance-and-backpressure.md §4.4)
                             if crate::core::metrics::send_with_backpressure(

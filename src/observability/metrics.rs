@@ -191,7 +191,8 @@ pub fn inc_ingest_frames(stream_id: &str, track: &'static str) {
 }
 
 pub fn inc_ingest_error(protocol: &'static str, error_type: &'static str) {
-    counter!("streaminfa_ingest_errors_total", "protocol" => protocol, "error_type" => error_type).increment(1);
+    counter!("streaminfa_ingest_errors_total", "protocol" => protocol, "error_type" => error_type)
+        .increment(1);
 }
 
 pub fn set_ingest_bitrate(stream_id: &str, bps: f64) {

@@ -97,8 +97,7 @@ pub async fn run_packager(
 
             match hls::generate_init_segment(&init_params) {
                 Ok(init_data) => {
-                    let init_path =
-                        manifest::init_segment_path(&stream_id_str, rendition.as_str());
+                    let init_path = manifest::init_segment_path(&stream_id_str, rendition.as_str());
                     let write = StorageWrite {
                         path: init_path,
                         data: init_data,
@@ -175,11 +174,7 @@ pub async fn run_packager(
                     rendition.as_str(),
                     mux_start.elapsed().as_secs_f64(),
                 );
-                let seg_path = manifest::segment_path(
-                    &stream_id_str,
-                    rendition.as_str(),
-                    sequence,
-                );
+                let seg_path = manifest::segment_path(&stream_id_str, rendition.as_str(), sequence);
                 let segment_size = segment_data.len() as u64;
                 let content_type = crate::storage::content_type_for_path(&seg_path).to_string();
                 let write = StorageWrite {

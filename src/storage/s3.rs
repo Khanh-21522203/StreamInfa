@@ -343,13 +343,14 @@ impl MediaStore for S3MediaStore {
 
                 if !keys.is_empty() {
                     let batch_len = keys.len() as u64;
-                    let delete = Delete::builder()
-                        .set_objects(Some(keys))
-                        .build()
-                        .map_err(|e| StorageError::S3DeleteFailed {
-                            path: prefix.to_string(),
-                            reason: e.to_string(),
-                        })?;
+                    let delete =
+                        Delete::builder()
+                            .set_objects(Some(keys))
+                            .build()
+                            .map_err(|e| StorageError::S3DeleteFailed {
+                                path: prefix.to_string(),
+                                reason: e.to_string(),
+                            })?;
 
                     self.client
                         .delete_objects()

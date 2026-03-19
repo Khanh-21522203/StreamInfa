@@ -266,7 +266,11 @@ impl Drop for DeliveryConnectionGuard {
     }
 }
 
-fn finalize_delivery_metrics(response: &Response, object_type: &'static str, start: std::time::Instant) {
+fn finalize_delivery_metrics(
+    response: &Response,
+    object_type: &'static str,
+    start: std::time::Instant,
+) {
     obs::inc_delivery_request(status_bucket(response.status()), object_type);
     obs::record_delivery_request_duration(object_type, start.elapsed().as_secs_f64());
     if response.status().is_success() {

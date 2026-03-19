@@ -127,8 +127,7 @@ impl StreamStateManager {
         };
 
         self.streams.insert(stream_id, entry.clone());
-        self.state_counts[Self::state_index(StreamState::Pending)]
-            .fetch_add(1, Ordering::Relaxed);
+        self.state_counts[Self::state_index(StreamState::Pending)].fetch_add(1, Ordering::Relaxed);
         self.update_stream_gauges();
 
         info!(%stream_id, mode = %ingest_mode, "stream created in PENDING state");
@@ -652,9 +651,6 @@ mod tests {
             .transition(stream_id, StreamState::Live)
             .await
             .unwrap();
-        assert_eq!(
-            manager.get_stream_state(stream_id),
-            Some(StreamState::Live)
-        );
+        assert_eq!(manager.get_stream_state(stream_id), Some(StreamState::Live));
     }
 }

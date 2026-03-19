@@ -1,6 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 use std::net::IpAddr;
 use std::time::Instant;
 
@@ -523,6 +523,8 @@ mod tests {
         let (_valid_key, _hash) = provider.generate_stream_key_for_stream(stream_id);
 
         // A completely different key should be rejected quickly (no bcrypt call for it)
-        assert!(provider.validate_stream_key("sk_totallyinvalidkey1234").is_err());
+        assert!(provider
+            .validate_stream_key("sk_totallyinvalidkey1234")
+            .is_err());
     }
 }
