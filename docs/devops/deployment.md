@@ -20,7 +20,7 @@
 
 ```bash
 STREAMINFA_ENV=production
-STREAMINFA_AUTH_ADMIN_TOKENS=at_prod_token_1,at_prod_token_2
+STREAMINFA_AUTH_ADMIN_BEARER_TOKENS=at_prod_token_1,at_prod_token_2
 STREAMINFA_STORAGE_ENDPOINT=https://s3.example.com
 STREAMINFA_STORAGE_BUCKET=streaminfa-media
 STREAMINFA_STORAGE_REGION=us-east-1
@@ -62,6 +62,21 @@ Keep secrets in environment variables, not committed config files.
 5. Deploy to production with rolling replacement.
 6. Verify SLO guardrails and error rates for 30-60 minutes.
 
+### 4.1 Operational Scripts
+
+Use these scripts from repository root for repeatable operations:
+
+```bash
+./scripts/deploy.sh <image_tag>
+./scripts/post_deploy_verify.sh http://localhost:8080 "$STREAMINFA_ADMIN_TOKEN"
+./scripts/rollback.sh <previous_image_tag_or_ref>
+```
+
+Notes:
+1. `deploy.sh` performs pull, graceful stop/start, and invokes post-deploy verification.
+2. `post_deploy_verify.sh` checks `/healthz`, `/readyz`, `/metrics`, and optional authenticated create/delete smoke flow.
+3. `rollback.sh` restores the previous image and then runs the same verification checks.
+
 ---
 
 ## 5. Post-Deploy Verification
@@ -75,6 +90,12 @@ Keep secrets in environment variables, not committed config files.
 4. Live stream can be created and played.
 5. VOD upload reaches `ready`.
 
+Recommended command:
+
+```bash
+STREAMINFA_ADMIN_TOKEN=<admin_token> ./scripts/post_deploy_verify.sh http://localhost:8080
+```
+
 ---
 
 ## 6. Rollback Procedure
@@ -87,6 +108,12 @@ Keep secrets in environment variables, not committed config files.
 3. Restart service with previous config bundle.
 4. Validate health/readiness and playback flow.
 5. Open incident review with root cause and mitigation tasks.
+
+Recommended command:
+
+```bash
+STREAMINFA_ADMIN_TOKEN=<admin_token> ./scripts/rollback.sh <previous_image_tag_or_ref>
+```
 
 ---
 
@@ -118,3 +145,16 @@ Restart required for:
 - [ ] Backup and retention policy documented
 - [ ] Rollback tested at least once
 
+## 9. CI Gate Mapping
+
+Phase E CI workflows are in:
+1. `.github/workflows/ci.yml`
+2. `.github/workflows/reliability-smoke.yml`
+
+Current gate coverage:
+1. Formatting (`cargo fmt --all --check`)
+2. Lint (`cargo clippy --all-targets -- -D warnings`)
+3. Tests (`cargo test --all`)
+4. Build check (`cargo check --features s3`)
+5. Dependency audit (`cargo audit`)
+6. Docker image build (`docker build`)

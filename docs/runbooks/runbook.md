@@ -20,6 +20,15 @@
    - storage failures
    - ffmpeg/transcode errors
 
+Quick command bundle:
+
+```bash
+curl -fsS http://localhost:8080/healthz
+curl -fsS http://localhost:8080/readyz
+curl -fsS http://localhost:8080/metrics | head -50
+docker logs --tail=200 streaminfa
+```
+
 ---
 
 ## 2. Incident Severity
@@ -49,6 +58,14 @@ Actions:
 2. Check crash logs and panic metrics.
 3. Validate storage dependency reachability.
 4. If restart fails, rollback to last known-good release.
+5. Run post-deploy verification after recovery.
+
+Recommended commands:
+
+```bash
+docker restart streaminfa
+STREAMINFA_ADMIN_TOKEN=<admin_token> ./scripts/post_deploy_verify.sh http://localhost:8080
+```
 
 Exit criteria:
 
@@ -72,6 +89,13 @@ Actions:
 3. Temporarily reduce ingest load if backpressure is climbing.
 4. Restore storage service; verify retries recover.
 5. If unresolved > 5 minutes, declare Sev-1 and rollback/degrade intake.
+6. If rollback is required, use scripted rollback path.
+
+Rollback command:
+
+```bash
+STREAMINFA_ADMIN_TOKEN=<admin_token> ./scripts/rollback.sh <previous_image_tag_or_ref>
+```
 
 Exit criteria:
 
@@ -151,3 +175,8 @@ Exit criteria:
 4. Add or adjust alert thresholds if detection lagged.
 5. Update this runbook if gaps were discovered.
 
+## 9. Script Reference
+
+1. Deploy: `./scripts/deploy.sh <image_tag>`
+2. Verify: `./scripts/post_deploy_verify.sh http://localhost:8080 "$STREAMINFA_ADMIN_TOKEN"`
+3. Rollback: `./scripts/rollback.sh <previous_image_tag_or_ref>`

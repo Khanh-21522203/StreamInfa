@@ -57,6 +57,8 @@ StreamInfa is **not** a video player, a frontend application, a CDN, or a recomm
 | **Observability** | `docs/observability/observability.md` | Metrics, logging, tracing, SLIs/SLOs |
 | **Docker** | `docs/devops/docker.md` | Dockerfile, docker-compose, local dev workflow |
 | **Deployment** | `docs/devops/deployment.md` | CI/CD, environment config, rollback strategy |
+| **Release Readiness** | `docs/devops/release-readiness.md` | Pre-release command checklist and sign-off gates |
+| **Operational Runbook** | `docs/runbooks/runbook.md` | Incident playbooks and deploy/rollback command references |
 
 ---
 

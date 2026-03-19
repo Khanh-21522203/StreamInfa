@@ -14,6 +14,16 @@ StreamInfa is a media infrastructure system. Media bugs are insidious: a dropped
 3. **Test failure paths as thoroughly as happy paths.** Media systems fail in production (corrupt streams, storage outages, CPU starvation). Test these scenarios explicitly.
 4. **Automated and reproducible.** Every test runs in CI with no manual steps. Test media fixtures are committed to the repo (small, purpose-built files).
 
+### 1.1 Current Phase E Baseline (Implemented)
+
+The following are now implemented in repository code:
+
+1. Integration API coverage in `tests/integration_control_plane.rs`
+2. In-process end-to-end playback flow in `tests/e2e_playback_flow.rs`
+3. Shared integration helpers in `tests/common/mod.rs`
+4. CI quality gate workflow in `.github/workflows/ci.yml`
+5. Weekly/manual reliability smoke workflow in `.github/workflows/reliability-smoke.yml`
+
 ---
 
 ## 2. Test Pyramid
@@ -93,6 +103,16 @@ Integration tests require:
 Integration tests are gated by a feature flag or environment variable:
 ```
 STREAMINFA_INTEGRATION_TESTS=1 cargo test --test '*'
+```
+
+Current baseline command set:
+
+```bash
+# Integration API contract tests
+cargo test --test integration_control_plane -- --nocapture
+
+# In-process E2E playback flow
+cargo test --test e2e_playback_flow -- --nocapture
 ```
 
 ### 4.2 Test Fixtures
@@ -278,7 +298,7 @@ done
 | **Linting** | `cargo clippy -- -D warnings` | Zero warnings | Yes |
 | **Unit tests** | `cargo test --lib --bins` | All pass | Yes |
 | **Integration tests** | `cargo test --test '*'` | All pass | Yes |
-| **E2E tests** | `cargo test --test 'e2e_*'` | All pass | Yes |
+| **E2E tests** | `cargo test --test e2e_playback_flow` | All pass | Yes |
 | **Code coverage** | `cargo tarpaulin` | ≥ 70% line coverage | No (informational) |
 | **Dependency audit** | `cargo audit` | No critical/high vulnerabilities | Yes |
 | **License check** | `cargo deny check licenses` | No GPL-only deps in app code | Yes |
@@ -293,7 +313,7 @@ CI runs on a machine with:
 - Docker + docker-compose (for MinIO and E2E tests)
 - FFmpeg 6.x installed (either system-level or via Docker)
 
-**CI runner recommendation:** GitHub Actions with `ubuntu-latest` runner. Use a custom Docker image with FFmpeg pre-installed to avoid installing it on every CI run.
+**CI implementation:** GitHub Actions with `ubuntu-latest` via `.github/workflows/ci.yml` and `.github/workflows/reliability-smoke.yml`.
 
 ---
 

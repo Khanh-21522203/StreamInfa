@@ -348,10 +348,9 @@ Response:
 #### Upload VOD Content
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/upload \
+curl -X POST http://localhost:8080/api/v1/streams/upload \
   -H "Authorization: Bearer <admin_token>" \
-  -F "file=@video.mp4" \
-  -F "stream_id=<stream_id>"
+  -F "file=@video.mp4"
 ```
 
 #### Play HLS Stream
@@ -386,56 +385,19 @@ curl http://localhost:8080/metrics    # Prometheus metrics
 
 ```bash
 # Run all tests
-cargo test
+cargo test --all -- --nocapture
 
-# Run tests with output
-cargo test -- --nocapture
+# Run integration API tests
+cargo test --test integration_control_plane -- --nocapture
 
-# Run specific module tests
-cargo test package::manifest
-cargo test transcode::profile
-cargo test storage::memory
+# Run in-process e2e playback flow
+cargo test --test e2e_playback_flow -- --nocapture
 ```
 
-## Stress Testing
+## Quality and Ops Workflows
 
-StreamInfa includes stress test scenarios in `tests/stress/` for benchmarking key components under load. These tests use Tokio's async runtime and measure throughput, latency, and correctness under concurrent access.
-
-### Running Stress Tests
-
-```bash
-# Run all stress tests (release mode recommended for realistic numbers)
-cargo test --release --test stress -- --nocapture
-
-# Run a specific scenario
-cargo test --release --test stress concurrent_stream_creation -- --nocapture
-cargo test --release --test stress storage_write_throughput -- --nocapture
-cargo test --release --test stress hls_manifest_generation -- --nocapture
-cargo test --release --test stress state_manager_contention -- --nocapture
-cargo test --release --test stress segment_index_window -- --nocapture
-```
-
-### Stress Test Scenarios
-
-| Scenario | What it measures | Parameters |
-|----------|-----------------|------------|
-| `concurrent_stream_creation` | Control plane throughput for creating streams | 100 concurrent streams |
-| `storage_write_throughput` | In-memory storage write throughput (segments/sec) | 1,000 segments × 200 KB |
-| `hls_manifest_generation` | Playlist generation throughput under load | 10,000 playlists with 30 segments each |
-| `state_manager_contention` | DashMap read/write contention with mixed workload | 50 writers + 200 readers |
-| `segment_index_window` | Sliding window performance with eviction | 100,000 segments through a 5-segment window |
-| `concurrent_storage_reads` | Read throughput with concurrent readers | 100 readers × 1,000 reads each |
-| `pipeline_event_throughput` | Event channel throughput (events/sec) | 50,000 events |
-
-### Interpreting Results
-
-Each test prints:
-- **Total time** — wall-clock duration
-- **Throughput** — operations per second
-- **Per-operation latency** — average time per operation
-
-Example output:
-```
-[stress::storage_write_throughput] 1000 segments written in 12.3ms (81,300 segments/sec, 1.23μs/op)
-[stress::state_manager_contention] 50 writers + 200 readers completed in 45.2ms (0 conflicts)
-```
+1. CI gates: `.github/workflows/ci.yml`
+2. Periodic/manual reliability smoke: `.github/workflows/reliability-smoke.yml`
+3. Deploy helper: `scripts/deploy.sh`
+4. Post-deploy verifier: `scripts/post_deploy_verify.sh`
+5. Rollback helper: `scripts/rollback.sh`

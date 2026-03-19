@@ -114,11 +114,14 @@ curl -s -X POST http://localhost:8080/api/v1/streams/upload \
 # Unit tests
 cargo test --lib --bins
 
-# Integration tests (requires stack + FFmpeg)
-STREAMINFA_INTEGRATION_TESTS=1 cargo test --test '*'
+# Integration tests (in-process control-plane contracts)
+cargo test --test integration_control_plane -- --nocapture
 
-# E2E tests
-cargo test --test 'e2e_*'
+# E2E smoke (in-process playback flow)
+cargo test --test e2e_playback_flow -- --nocapture
+
+# Full suite
+cargo test --all -- --nocapture
 ```
 
 ---
@@ -137,4 +140,3 @@ cargo test --test 'e2e_*'
 4. High CPU / transcode stalls:
    - Reduce concurrent streams in local tests.
    - Use lower-resolution input fixtures.
-
