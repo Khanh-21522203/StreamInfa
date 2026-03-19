@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use rand::Rng;
+use subtle::ConstantTimeEq;
 use tracing::warn;
 
 use super::config::AuthConfig;
@@ -23,14 +24,15 @@ const ALPHANUMERIC: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 /// This allows `AuthProvider` to be shared via `Arc<AuthProvider>` without
 /// requiring `Arc<Mutex<AuthProvider>>`.
 ///
-/// Stream keys and admin tokens are stored as bcrypt hashes (security.md §2.1, §2.2).
-/// Comparison uses bcrypt_verify which is inherently constant-time.
+/// Stream keys are stored as bcrypt hashes.
+/// Admin bearer tokens are kept as plaintext in memory and compared with
+/// constant-time equality to avoid expensive per-request bcrypt verification.
 #[derive(Debug)]
 pub struct AuthProvider {
     /// Valid RTMP stream keys stored as bcrypt hashes.
     ingest_keys: Mutex<Vec<IngestKeyRecord>>,
-    /// Valid admin bearer tokens stored as bcrypt hashes.
-    admin_token_hashes: Mutex<Vec<String>>,
+    /// Valid admin bearer tokens in plaintext for fast constant-time checks.
+    admin_tokens: Mutex<Vec<String>>,
     /// IP-based brute-force tracker (from security.md §2.1).
     brute_force_tracker: Mutex<HashMap<IpAddr, BruteForceEntry>>,
 }
@@ -54,7 +56,7 @@ struct BruteForceEntry {
 
 impl AuthProvider {
     pub fn new(config: &AuthConfig) -> Self {
-        // Hash all configured keys/tokens at startup (security.md §2.1, §2.2)
+        // Hash all configured ingest keys at startup (security.md §2.1).
         let key_hashes: Vec<IngestKeyRecord> = config
             .ingest_stream_keys
             .iter()
@@ -67,14 +69,9 @@ impl AuthProvider {
                     })
             })
             .collect();
-        let token_hashes: Vec<String> = config
-            .admin_bearer_tokens
-            .iter()
-            .filter_map(|t| bcrypt::hash(t, BCRYPT_COST).ok())
-            .collect();
         Self {
             ingest_keys: Mutex::new(key_hashes),
-            admin_token_hashes: Mutex::new(token_hashes),
+            admin_tokens: Mutex::new(config.admin_bearer_tokens.clone()),
             brute_force_tracker: Mutex::new(HashMap::new()),
         }
     }
@@ -108,17 +105,14 @@ impl AuthProvider {
     }
 
     /// Generate a new admin bearer token with `at_` prefix + 32 random alphanumeric chars.
-    /// Returns (plaintext_token, bcrypt_hash) (security.md §2.2).
+    /// Returns (plaintext_token, bcrypt_hash) for audit/compatibility.
     pub fn generate_admin_token(&self) -> (String, String) {
         let plaintext = generate_random_token("at_", 32);
         let hash = bcrypt::hash(&plaintext, BCRYPT_COST)
             .expect("bcrypt hash should not fail for valid input");
         {
-            let mut hashes = self
-                .admin_token_hashes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            hashes.push(hash.clone());
+            let mut tokens = self.admin_tokens.lock().unwrap_or_else(|e| e.into_inner());
+            tokens.push(plaintext.clone());
         }
         (plaintext, hash)
     }
@@ -252,22 +246,19 @@ impl AuthProvider {
         tracker.remove(&ip);
     }
 
-    /// Validate an admin bearer token against stored bcrypt hashes.
+    /// Validate an admin bearer token against stored admin token set.
     /// Returns true if the token is valid.
     /// If no tokens are configured, all requests are accepted (open mode).
-    /// Uses bcrypt_verify which is inherently constant-time (security.md §2.2).
+    /// Uses constant-time string equality to avoid timing leaks (security.md §2.2).
     pub fn validate_bearer_token(&self, token: &str) -> bool {
-        let hashes = self
-            .admin_token_hashes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if hashes.is_empty() {
+        let tokens = self.admin_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        if tokens.is_empty() {
             return true;
         }
 
-        hashes
+        tokens
             .iter()
-            .any(|h| bcrypt::verify(token, h).unwrap_or(false))
+            .any(|t| token.as_bytes().ct_eq(t.as_bytes()).unwrap_u8() == 1)
     }
 
     /// Check a bearer token from an Authorization header.
@@ -328,22 +319,15 @@ impl AuthProvider {
     }
 
     /// Update admin bearer tokens at runtime.
-    /// Accepts plaintext tokens and hashes them before storing.
+    /// Accepts plaintext tokens and stores them for constant-time comparisons.
     pub fn update_admin_tokens(&self, tokens: Vec<String>) {
-        let hashes: Vec<String> = tokens
-            .iter()
-            .filter_map(|t| bcrypt::hash(t, BCRYPT_COST).ok())
-            .collect();
-        let mut current = self
-            .admin_token_hashes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *current = hashes;
+        let mut current = self.admin_tokens.lock().unwrap_or_else(|e| e.into_inner());
+        *current = tokens;
     }
 
     /// Check if running in open mode (no admin tokens configured).
     pub fn is_open_mode(&self) -> bool {
-        self.admin_token_hashes
+        self.admin_tokens
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
@@ -448,5 +432,16 @@ mod tests {
 
         provider.update_admin_tokens(Vec::new());
         assert!(provider.is_open_mode());
+    }
+
+    #[test]
+    fn test_bearer_token_validation_constant_time_path() {
+        let provider = AuthProvider::new(&AuthConfig {
+            ingest_stream_keys: Vec::new(),
+            admin_bearer_tokens: vec!["at_abc123".to_string()],
+        });
+
+        assert!(provider.validate_bearer_token("at_abc123"));
+        assert!(!provider.validate_bearer_token("at_wrong"));
     }
 }

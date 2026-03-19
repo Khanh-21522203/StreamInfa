@@ -217,6 +217,36 @@ impl StreamStateManager {
             .collect()
     }
 
+    /// List streams with offset/limit pagination while avoiding full cloning.
+    ///
+    /// Returns `(page, total_matching)` where `total_matching` reflects the full
+    /// filtered set size before pagination.
+    pub async fn list_streams_paginated(
+        &self,
+        filter_state: Option<StreamState>,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<StreamEntry>, usize) {
+        let mut total_matching = 0usize;
+        let mut page = Vec::with_capacity(limit);
+
+        for entry in self.streams.iter() {
+            if !filter_state
+                .map(|s| entry.value().state == s)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+
+            if total_matching >= offset && page.len() < limit {
+                page.push(entry.value().clone());
+            }
+            total_matching += 1;
+        }
+
+        (page, total_matching)
+    }
+
     /// Set media info for a stream (called when ingest detects codecs).
     pub async fn set_media_info(&self, stream_id: StreamId, media_info: MediaInfo) {
         if let Some(mut entry) = self.streams.get_mut(&stream_id) {
@@ -536,5 +566,25 @@ mod tests {
 
         let all = manager.list_streams(None).await;
         assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_list_streams_paginated_returns_page_and_total() {
+        let manager = StreamStateManager::new();
+        let id1 = StreamId::new();
+        let id2 = StreamId::new();
+        let id3 = StreamId::new();
+
+        manager.create_stream(id1, IngestMode::Live).await;
+        manager.create_stream(id2, IngestMode::Vod).await;
+        manager.create_stream(id3, IngestMode::Vod).await;
+
+        let (page1, total1) = manager.list_streams_paginated(None, 0, 2).await;
+        assert_eq!(total1, 3);
+        assert_eq!(page1.len(), 2);
+
+        let (page2, total2) = manager.list_streams_paginated(None, 2, 2).await;
+        assert_eq!(total2, 3);
+        assert_eq!(page2.len(), 1);
     }
 }

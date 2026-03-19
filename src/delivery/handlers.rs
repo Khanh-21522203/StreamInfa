@@ -565,7 +565,6 @@ pub async fn list_streams(
         },
         None => None,
     };
-    let all_streams = state.state_manager.list_streams(filter).await;
 
     let limit = query.limit.unwrap_or(DEFAULT_LIST_LIMIT);
     if limit == 0 || limit > MAX_LIST_LIMIT {
@@ -579,12 +578,13 @@ pub async fn list_streams(
         );
     }
     let offset = query.offset.unwrap_or(0);
-    let total = all_streams.len();
+    let (page, total) = state
+        .state_manager
+        .list_streams_paginated(filter, offset, limit)
+        .await;
 
-    let streams: Vec<StreamSummary> = all_streams
+    let streams: Vec<StreamSummary> = page
         .into_iter()
-        .skip(offset)
-        .take(limit)
         .map(|entry| StreamSummary {
             stream_id: entry.metadata.stream_id.to_string(),
             status: entry.state.to_string(),

@@ -414,41 +414,99 @@ cargo test --test e2e_playback_flow -- --nocapture
 
 ## Benchmarking
 
+Run the benchmark harness:
+
 ```bash
 # Control-plane benchmark (list + create/delete)
 ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh control
 
-# Delivery benchmark (requires a stream with available artifacts)
+# Ingest benchmark (VOD upload + ready latency)
+ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh ingest
+
+# Delivery benchmark (auto-prepares stream when DELIVERY_STREAM_ID is omitted)
 DELIVERY_STREAM_ID=<uuidv7> ./scripts/benchmark.sh delivery
+
+# Full suite
+ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh all
 ```
+
+Artifacts are written to:
+1. Default directory: `.tmp/benchmarks/<YYYYMMDD-HHMMSS>` (override with `BENCH_OUT_DIR`).
+2. Per-scenario k6 summary: `<scenario>-<timestamp>-k6-summary.json`.
+3. Optional metrics snapshots (`METRICS_SNAPSHOT=1`): `...-metrics-before.prom` and `...-metrics-after.prom`.
+4. Optional metrics delta (when both snapshots exist): `...-metrics-delta.txt`.
 
 Detailed guide: `docs/testing/benchmarking.md`
 
-### Benchmark Snapshot (2026-03-19)
+Tip (Docker k6 against local service):
+1. Use `BASE_URL=http://host.docker.internal:8080`.
+2. Keep metrics scrape URL on host side: `METRICS_URL=http://localhost:8080/metrics`.
+
+### Control Benchmark Snapshot (Latest: 2026-03-19 09:00, Post-Optimization)
 
 Environment:
 1. StreamInfa `release` build (`cargo build --release`)
 2. Benchmark runner: Docker `grafana/k6:0.50.0`
-3. Parameters: `DURATION=20s`, `VUS=10`, `CONTROL_CREATE_VUS=2`
+3. Parameters: `DURATION=8s`, `VUS=10`, `CONTROL_CREATE_VUS=2`, `METRICS_SNAPSHOT=0`
 4. Target: `BASE_URL=http://host.docker.internal:8080`
 
-Results:
+k6 results:
 
-| Metric | Value |
-|---|---|
-| `http_reqs` | `226` total (`10.55 req/s`) |
-| `http_req_failed` | `0.00%` |
-| `http_req_duration` avg | `1.00s` |
-| `http_req_duration` p90 | `1.40s` |
-| `http_req_duration` p95 | `2.78s` |
-| `http_req_duration` max | `9.53s` |
-| `control_create_delete_duration_ms` avg | `2733.4ms` |
-| `control_create_delete_duration_ms` p95 | `6235.4ms` |
-| `iterations` | `211` total (`9.85 iter/s`) |
+| Case                                        | avg_ms  | p50    | p95    | min   | max     | qps    |
+|---------------------------------------------|--------:|-------:|-------:|------:|--------:|-------:|
+| `control.list_streams_http_duration`        |  21.708 |  5.949 | 77.715 | 1.110 | 175.542 | 79.741 |
+| `control.create_delete_http_duration`       |  53.080 | 67.306 | 140.565| 1.374 | 290.090 |  9.475 |
+| `control.create_delete_e2e_duration_ms`     | 108.961 | 89.000 | 199.600|68.000 | 293.000 |  9.475 |
 
 Notes:
 1. This snapshot is for local single-node benchmarking only; treat it as a baseline, not an SLO.
-2. Current k6 thresholds in `scripts/k6/control-plane.js` are stricter than the above values, so the run reports threshold-crossed even with `0%` request failures.
+2. All control scenario checks passed in this run (`879` passes, `0` fails).
+
+### Ingest Benchmark Snapshot (Latest: 2026-03-19 08:37)
+
+Environment:
+1. StreamInfa `release` build (`cargo build --release`)
+2. Benchmark runner: Docker `grafana/k6:0.50.0`
+3. Parameters: `DURATION=6s`, `INGEST_UPLOAD_VUS=2`, `UPLOAD_SAMPLE_SIZE_BYTES=262144`
+4. Target: `BASE_URL=http://host.docker.internal:8080`
+
+k6 results:
+
+| Case                                   | avg_ms  | p50     | p95     | min     | max     | qps     |
+|----------------------------------------|--------:|--------:|--------:|--------:|--------:|--------:|
+| `ingest.http_req_duration`             | 129.919 | 127.214 | 185.228 |  86.121 | 208.064 |  12.088 |
+| `ingest.upload_request_duration_ms`    | 108.726 |  97.797 | 181.698 |  86.121 | 208.064 |   4.029 |
+| `ingest.upload_to_ready_duration_ms`   | 240.077 | 224.000 | 318.000 | 198.000 | 332.000 |   4.029 |
+
+Prometheus delta (captured from the latest ingest run with metrics snapshots):
+
+| Metric | Delta |
+|---|---|
+| `upload_count` | `15` |
+| `upload_avg_duration_seconds` | `0.115` |
+| `upload_avg_size_bytes` | `262144` |
+| `package_segments_written_total` | `45` |
+| `package_manifest_updates_total` | `45` |
+| `storage_put_bytes_total` | `11859480` |
+| `storage_errors_total` | `0` |
+| `backpressure_events_total` | `0` |
+| `auth_failures_total` | `0` |
+
+### Delivery Benchmark Snapshot (Latest: 2026-03-19 09:20)
+
+Environment:
+1. StreamInfa `release` build (`cargo build --release`)
+2. Benchmark runner: Docker `grafana/k6:0.50.0`
+3. Parameters: `DURATION=8s`, `VUS=10`, `DELIVERY_USE_RANGE=1`, `AUTO_PREPARE_DELIVERY=0`
+4. Target: `BASE_URL=http://host.docker.internal:8080`
+
+k6 results:
+
+| Case                                | avg_ms  | p50     | p95     | min     | max     | qps      |
+|-------------------------------------|--------:|--------:|--------:|--------:|--------:|---------:|
+| `delivery.http_req_duration`        |   4.811 |   2.662 |  15.382 |   0.931 |  50.766 |  323.764 |
+| `delivery.iteration_duration`       | 122.461 | 117.456 | 145.668 | 107.712 | 276.193 |   80.941 |
+| `delivery.http_req_waiting`         |   3.046 |   2.078 |   8.022 |   0.848 |  35.941 |  323.764 |
 
 ## Quality and Ops Workflows
 
