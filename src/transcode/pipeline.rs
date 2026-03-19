@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+#[cfg(not(feature = "ffmpeg"))]
+use tracing::warn;
+use tracing::{error, info};
 
 use crate::control::state::StreamStateManager;
 use crate::core::config::TranscodeConfig;
@@ -10,7 +12,10 @@ use crate::core::error::TranscodeError;
 use crate::core::types::{DemuxedFrame, EncodedSegment, StreamId};
 use crate::observability::metrics as obs;
 
-use super::profile::{select_renditions, SelectedRendition};
+use super::profile::select_renditions;
+#[cfg(not(feature = "ffmpeg"))]
+use super::profile::SelectedRendition;
+#[cfg(not(feature = "ffmpeg"))]
 use super::segment::{EncodedPacket, SegmentAccumulator};
 
 // ---------------------------------------------------------------------------
@@ -18,6 +23,7 @@ use super::segment::{EncodedPacket, SegmentAccumulator};
 // ---------------------------------------------------------------------------
 
 /// Max consecutive decode errors before aborting (from transcoding-and-packaging.md §3.2).
+#[cfg(not(feature = "ffmpeg"))]
 const MAX_CONSECUTIVE_DECODE_ERRORS: u32 = 10;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +58,195 @@ impl TranscodePipeline {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // FFmpeg implementation (real H.264 decode + libx264 encode)
+    // -----------------------------------------------------------------------
+
+    /// Start a live transcode pipeline using real FFmpeg transcoding.
+    ///
+    /// Architecture:
+    /// 1. Select renditions based on source resolution.
+    /// 2. Bridge the async ingest channel to a blocking FFmpeg thread via a
+    ///    tokio mpsc channel — `blocking_recv()` on the blocking side avoids
+    ///    blocking the async runtime.
+    /// 3. The blocking thread decodes each frame once and encodes N renditions.
+    /// 4. Cancellation drops the bridge sender, which causes the blocking
+    ///    thread's `blocking_recv()` to return `None` and exit cleanly.
+    #[cfg(feature = "ffmpeg")]
+    pub async fn run_live(
+        &self,
+        stream_id: StreamId,
+        source_width: u32,
+        source_height: u32,
+        source_fps: f64,
+        mut frame_rx: mpsc::Receiver<DemuxedFrame>,
+        segment_tx: mpsc::Sender<EncodedSegment>,
+    ) -> Result<(), TranscodeError> {
+        let renditions =
+            select_renditions(source_width, source_height, &self.config.profile_ladder);
+
+        if renditions.is_empty() {
+            return Err(TranscodeError::FfmpegInit {
+                reason: "no renditions selected for source resolution".to_string(),
+            });
+        }
+
+        obs::inc_transcode_active_jobs();
+        let _active_job_guard = TranscodeActiveJobGuard;
+
+        self.state_manager
+            .set_expected_renditions(stream_id, renditions.len())
+            .await;
+
+        info!(
+            %stream_id,
+            rendition_count = renditions.len(),
+            source = format!("{}x{}@{:.1}fps", source_width, source_height, source_fps),
+            "starting FFmpeg transcode pipeline"
+        );
+
+        // Bridge: async frame_rx → blocking FFmpeg thread.
+        let (bridge_tx, bridge_rx) = mpsc::channel::<DemuxedFrame>(64);
+        let target_duration = self.config.keyframe_interval_secs as f64 * 3.0; // ~6s
+        let cancel = self.cancel.clone();
+        let stream_id_str = stream_id.to_string();
+
+        // Spawn blocking FFmpeg pipeline.
+        let ffmpeg_handle = tokio::task::spawn_blocking(move || {
+            super::ffmpeg::transcode_blocking(
+                stream_id,
+                bridge_rx,
+                segment_tx,
+                renditions,
+                source_width,
+                source_height,
+                source_fps,
+                target_duration,
+            )
+        });
+
+        // Feed frames from the ingest channel into the bridge.
+        'feed: loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!(%stream_id, "transcode cancelled");
+                    break 'feed;
+                }
+                frame = frame_rx.recv() => {
+                    match frame {
+                        Some(f) => {
+                            obs::set_transcode_queue_depth(
+                                &stream_id_str,
+                                frame_rx.len() as f64,
+                            );
+                            if bridge_tx.send(f).await.is_err() {
+                                // FFmpeg thread exited early (error or done).
+                                break 'feed;
+                            }
+                        }
+                        None => {
+                            info!(%stream_id, "ingest channel closed, flushing FFmpeg pipeline");
+                            break 'feed;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Drop bridge_tx to signal EOF to the blocking thread.
+        drop(bridge_tx);
+
+        // Wait for the FFmpeg thread to finish and propagate any error.
+        let result = ffmpeg_handle
+            .await
+            .map_err(|e| TranscodeError::FfmpegInit {
+                reason: format!("spawn_blocking join: {e}"),
+            })?;
+
+        if let Err(ref e) = result {
+            error!(%stream_id, error = %e, "FFmpeg transcode pipeline error");
+        } else {
+            info!(%stream_id, "FFmpeg transcode pipeline finished");
+        }
+
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // FFmpeg VOD from file
+    // -----------------------------------------------------------------------
+
+    /// Transcode a VOD file directly using FFmpeg's container demuxer.
+    ///
+    /// Unlike `run_live`, this does not use an ingest channel — FFmpeg opens the
+    /// file itself via `ffmpeg::format::input`, demuxes it, and feeds packets
+    /// directly to the decoder. This correctly handles codec extradata (SPS/PPS)
+    /// embedded in MP4/MKV containers.
+    #[cfg(feature = "ffmpeg")]
+    pub async fn run_vod_from_file(
+        &self,
+        stream_id: StreamId,
+        file_path: std::path::PathBuf,
+        source_width: u32,
+        source_height: u32,
+        source_fps: f64,
+        segment_tx: mpsc::Sender<EncodedSegment>,
+    ) -> Result<(), TranscodeError> {
+        let renditions =
+            select_renditions(source_width, source_height, &self.config.profile_ladder);
+
+        if renditions.is_empty() {
+            return Err(TranscodeError::FfmpegInit {
+                reason: "no renditions selected for source resolution".to_string(),
+            });
+        }
+
+        obs::inc_transcode_active_jobs();
+        let _active_job_guard = TranscodeActiveJobGuard;
+
+        self.state_manager
+            .set_expected_renditions(stream_id, renditions.len())
+            .await;
+
+        info!(
+            %stream_id,
+            rendition_count = renditions.len(),
+            source = format!("{}x{}@{:.1}fps", source_width, source_height, source_fps),
+            "starting FFmpeg VOD transcode from file"
+        );
+
+        let target_duration = self.config.keyframe_interval_secs as f64 * 3.0;
+        let cancel = self.cancel.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            super::ffmpeg::transcode_vod_from_file_blocking(
+                stream_id,
+                file_path,
+                segment_tx,
+                renditions,
+                source_fps,
+                target_duration,
+                cancel,
+            )
+        })
+        .await
+        .map_err(|e| TranscodeError::FfmpegInit {
+            reason: format!("spawn_blocking join: {e}"),
+        })?;
+
+        if let Err(ref e) = result {
+            error!(%stream_id, error = %e, "FFmpeg VOD transcode error");
+        } else {
+            info!(%stream_id, "FFmpeg VOD transcode finished");
+        }
+
+        result
+    }
+
+    // -----------------------------------------------------------------------
+    // Placeholder implementation (passthrough — no real transcoding)
+    // -----------------------------------------------------------------------
+
     /// Start a live transcode pipeline for a stream.
     ///
     /// Task structure (from transcoding-and-packaging.md §5.2):
@@ -61,6 +256,7 @@ impl TranscodePipeline {
     /// In a full implementation, the decoder and encoders communicate via
     /// crossbeam::channel (bounded, capacity 8) since both run on blocking threads.
     /// For now, this is structured to show the architecture with placeholder FFmpeg calls.
+    #[cfg(not(feature = "ffmpeg"))]
     pub async fn run_live(
         &self,
         stream_id: StreamId,
@@ -206,6 +402,7 @@ impl TranscodePipeline {
     /// 1. Feed NALU to decoder via avcodec_send_packet
     /// 2. Receive decoded YUV frame via avcodec_receive_frame
     /// 3. For each rendition: scale + encode + push to accumulator
+    #[cfg(not(feature = "ffmpeg"))]
     async fn process_frame(
         &self,
         frame: &DemuxedFrame,
@@ -214,6 +411,16 @@ impl TranscodePipeline {
         segment_tx: &mpsc::Sender<EncodedSegment>,
     ) -> Result<(), TranscodeError> {
         let is_audio = frame.track.is_audio();
+
+        // Capture audio parameters from the track info so the packager can
+        // derive the correct AudioSpecificConfig in the init segment.
+        if is_audio {
+            if let crate::core::types::Track::Audio { sample_rate, channels, .. } = frame.track {
+                for (_, acc) in accumulators.iter_mut() {
+                    acc.set_audio_params(sample_rate, channels);
+                }
+            }
+        }
 
         // Create an encoded packet (placeholder: pass through raw data)
         let packet = EncodedPacket {
@@ -252,6 +459,7 @@ impl TranscodePipeline {
     }
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 fn transcode_error_type(err: &TranscodeError) -> &'static str {
     match err {
         TranscodeError::FfmpegInit { .. } => "ffmpeg_init",

@@ -27,7 +27,7 @@ bitrate_kbps = 3500
 audio_bitrate_kbps = 128
 profile = "high"
 level = "4.1"
-preset = "medium"
+preset = "veryfast"
 
 [[transcode.profile_ladder]]
 name = "medium"
@@ -37,7 +37,7 @@ bitrate_kbps = 2000
 audio_bitrate_kbps = 128
 profile = "main"
 level = "3.1"
-preset = "medium"
+preset = "veryfast"
 
 [[transcode.profile_ladder]]
 name = "low"
@@ -47,7 +47,7 @@ bitrate_kbps = 1000
 audio_bitrate_kbps = 96
 profile = "main"
 level = "3.0"
-preset = "medium"
+preset = "veryfast"
 
 [packaging]
 segment_duration_secs = 6

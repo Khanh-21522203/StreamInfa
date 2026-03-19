@@ -39,7 +39,7 @@ async fn main() -> ExitCode {
     };
 
     // Initialize tracing / logging
-    init_tracing(
+    let log_reload_handle = init_tracing(
         &config.observability.log_level,
         &config.observability.log_format,
     );
@@ -177,8 +177,9 @@ async fn main() -> ExitCode {
     // Start SIGHUP config reload task (from security.md §6.3)
     let reload_auth = auth.clone();
     let reload_cancel = shutdown.token().clone();
+    let reload_log_handle = log_reload_handle;
     background_tasks.push(tokio::spawn(async move {
-        run_config_reload_task(reload_auth, reload_cancel).await;
+        run_config_reload_task(reload_auth, reload_log_handle, reload_cancel).await;
     }));
 
     // Start brute-force tracker cleanup task (from security.md §2.1)
@@ -305,15 +306,21 @@ async fn wait_for_state_drain(
 /// On SIGHUP:
 /// 1. Reload config from disk
 /// 2. Update auth tokens (admin bearer tokens + stream keys)
+/// 3. Hot-reload log level via `tracing_subscriber::reload::Handle`
 ///
-/// This enables zero-downtime token rotation.
+/// This enables zero-downtime token rotation and log-level changes.
 async fn run_config_reload_task(
     auth: Arc<streaminfa::core::auth::AuthProvider>,
+    log_reload_handle: tracing_subscriber::reload::Handle<
+        tracing_subscriber::EnvFilter,
+        tracing_subscriber::Registry,
+    >,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     #[cfg(not(unix))]
     {
         let _ = auth;
+        let _ = log_reload_handle;
         info!("SIGHUP config reload is not supported on this platform");
         cancel.cancelled().await;
         info!("config reload task shutting down");
@@ -346,14 +353,19 @@ async fn run_config_reload_task(
                             auth.update_stream_keys(new_config.auth.ingest_stream_keys);
                             auth.update_admin_tokens(new_config.auth.admin_bearer_tokens);
 
-                            // Hot-reloadable: log level (control-plane-vs-data-plane.md §6.1)
-                            // Note: tracing-subscriber's reload handle would be ideal here,
-                            // but for now we log the new level. A full implementation would
-                            // use a reload::Handle<EnvFilter>.
-                            info!(
-                                new_log_level = %new_config.observability.log_level,
-                                "log level reload requested (takes effect on next process start)"
-                            );
+                            // Hot-reload log level immediately via the reload handle.
+                            let new_level = &new_config.observability.log_level;
+                            match tracing_subscriber::EnvFilter::try_new(new_level) {
+                                Ok(new_filter) => {
+                                    match log_reload_handle.modify(|f| *f = new_filter) {
+                                        Ok(()) => info!(new_log_level = %new_level, "log level reloaded"),
+                                        Err(e) => warn!(error = %e, "failed to apply new log level"),
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(new_log_level = %new_level, error = %e, "invalid log level directive, keeping current");
+                                }
+                            }
 
                             // Hot-reloadable: CORS origins (control-plane-vs-data-plane.md §6.1)
                             // CORS layer is set at router build time; new origins take effect
@@ -399,22 +411,34 @@ async fn run_brute_force_cleanup_task(
     }
 }
 
-fn init_tracing(log_level: &str, log_format: &str) {
-    use tracing_subscriber::EnvFilter;
+fn init_tracing(
+    log_level: &str,
+    log_format: &str,
+) -> tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>
+{
+    use tracing_subscriber::{layer::SubscriberExt, reload, EnvFilter, Registry};
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    let (filter_layer, reload_handle) = reload::Layer::new(filter);
 
     match log_format {
         "json" => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
+            let subscriber = Registry::default()
+                .with(filter_layer)
+                .with(tracing_subscriber::fmt::layer().json());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("failed to set tracing subscriber");
         }
         _ => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
+            let subscriber = Registry::default()
+                .with(filter_layer)
+                .with(tracing_subscriber::fmt::layer());
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("failed to set tracing subscriber");
         }
     }
+
+    reload_handle
 }
 
 #[cfg(test)]

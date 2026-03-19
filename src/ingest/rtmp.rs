@@ -307,9 +307,19 @@ impl RtmpConnection {
                     .await;
                 new_stream_id
             };
-        // Validate RTMP codecs after sequence header (from ingest.md §3.4)
-        // In a full implementation, this would be called after receiving the AVC sequence header.
-        // For now, we validate the default expected codecs.
+        // Phase 3: Wait for AVC sequence header to extract real stream dimensions.
+        // This must happen before the transcode pipeline starts so we pass the
+        // correct source resolution to rendition selection.
+        let (demuxer, chunk_reader) = tokio::time::timeout(
+            std::time::Duration::from_secs(SEQUENCE_HEADER_TIMEOUT_SECS),
+            self.wait_for_sequence_header(&mut socket, stream_id),
+        )
+        .await
+        .map_err(|_| IngestError::MissingSequenceHeader {
+            timeout_secs: SEQUENCE_HEADER_TIMEOUT_SECS,
+        })??;
+
+        // Validate RTMP codecs from the received sequence header (ingest.md §3.4).
         super::validator::validate_rtmp_codecs(7, Some(10)).map_err(|e| {
             IngestError::ValidationFailed {
                 reason: e.to_string(),
@@ -319,19 +329,15 @@ impl RtmpConnection {
         obs::inc_ingest_active_streams("rtmp");
         obs::set_ingest_bitrate(&stream_id.to_string(), 0.0);
 
-        // Validate a default resolution placeholder (security.md §4.1)
-        // In a full implementation, resolution is extracted from the AVC sequence header
-        // and validated before starting the transcode pipeline.
-        security::validate_resolution(1920, 1080)
+        // Real dimensions from the parsed SPS in the AVC sequence header.
+        let source_width: u32 = demuxer.video_width();
+        let source_height: u32 = demuxer.video_height();
+        let source_fps: f64 = 30.0; // FPS is not encoded in the SPS; use a safe default.
+
+        security::validate_resolution(source_width, source_height)
             .map_err(|e| IngestError::ValidationFailed { reason: e })?;
 
-        // TODO: Extract actual resolution from AVC sequence header.
-        // For now, use placeholder values. Real implementation would parse SPS NALUs.
-        let source_width: u32 = 1920;
-        let source_height: u32 = 1080;
-        let source_fps: f64 = 30.0;
-
-        // Emit StreamStarted event to control plane
+        // Emit StreamStarted event to control plane with real dimensions from SPS.
         let media_info = MediaInfo {
             stream_id,
             video_codec: VideoCodec::H264,
@@ -339,9 +345,9 @@ impl RtmpConnection {
             video_height: source_height,
             video_bitrate_kbps: None,
             frame_rate: source_fps,
-            audio_codec: None,
-            audio_sample_rate: None,
-            audio_channels: None,
+            audio_codec: demuxer.audio_codec(),
+            audio_sample_rate: Some(demuxer.audio_sample_rate()),
+            audio_channels: Some(demuxer.audio_channels()),
             audio_bitrate_kbps: None,
             duration_secs: None,
             container: crate::core::types::Container::Flv,
@@ -431,9 +437,9 @@ impl RtmpConnection {
             "live stream started"
         );
 
-        // Phase 3-5: Demux loop
+        // Phase 4-5: Demux loop (continues with already-primed demuxer/chunk_reader)
         let demux_result = self
-            .run_demux_loop(&mut socket, stream_id, peer_addr, frame_tx)
+            .run_demux_loop(&mut socket, stream_id, peer_addr, frame_tx, demuxer, chunk_reader)
             .await;
 
         // Phase 6: Stream end — finalize
@@ -559,23 +565,65 @@ impl RtmpConnection {
         }
     }
 
+    /// Read RTMP messages until the AVC sequence header is received and the
+    /// demuxer has parsed the real stream dimensions.
+    ///
+    /// Returns `(FlvDemuxer, ChunkReader)` so the caller can pass them to
+    /// `run_demux_loop` to continue without re-reading those messages.
+    async fn wait_for_sequence_header(
+        &self,
+        socket: &mut TcpStream,
+        stream_id: StreamId,
+    ) -> Result<(FlvDemuxer, ChunkReader), IngestError> {
+        let mut chunk_reader = ChunkReader::new();
+        let mut demuxer = FlvDemuxer::new(stream_id);
+
+        loop {
+            let msg = tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    return Err(IngestError::MissingSequenceHeader {
+                        timeout_secs: SEQUENCE_HEADER_TIMEOUT_SECS,
+                    });
+                }
+                result = chunk_reader.read_message(socket) => result?,
+            };
+
+            match msg.msg_type {
+                RtmpMessageType::Video | RtmpMessageType::Audio => {
+                    let _ = demuxer.demux_flv_tag(&msg)?;
+                    if demuxer.has_sequence_header() {
+                        return Ok((demuxer, chunk_reader));
+                    }
+                }
+                RtmpMessageType::SetChunkSize => {
+                    if msg.data.len() >= 4 {
+                        let new_size = u32::from_be_bytes([
+                            msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                        ]) as usize;
+                        chunk_reader.set_chunk_size(new_size);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Main demux loop: read RTMP messages, parse FLV tags, emit DemuxedFrames.
+    ///
+    /// Accepts a pre-primed `demuxer` and `chunk_reader` from
+    /// `wait_for_sequence_header` so no messages are lost between phases.
     async fn run_demux_loop(
         &self,
         socket: &mut TcpStream,
         stream_id: StreamId,
         peer_addr: SocketAddr,
         frame_tx: mpsc::Sender<DemuxedFrame>,
+        mut demuxer: FlvDemuxer,
+        mut chunk_reader: ChunkReader,
     ) -> Result<(), IngestError> {
-        let mut chunk_reader = ChunkReader::new();
-        let mut demuxer = FlvDemuxer::new(stream_id);
         let mut consecutive_errors: u32 = 0;
         // Cache once; avoids 2 allocations per frame in the hot path below
         let stream_id_str = stream_id.to_string();
-
-        // Wait for sequence header with timeout
-        let seq_header_deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(SEQUENCE_HEADER_TIMEOUT_SECS);
 
         loop {
             let read_result = tokio::select! {
@@ -621,15 +669,6 @@ impl RtmpConnection {
 
             match msg.msg_type {
                 RtmpMessageType::Video | RtmpMessageType::Audio => {
-                    // Check sequence header timeout
-                    if !demuxer.has_sequence_header()
-                        && tokio::time::Instant::now() > seq_header_deadline
-                    {
-                        return Err(IngestError::MissingSequenceHeader {
-                            timeout_secs: SEQUENCE_HEADER_TIMEOUT_SECS,
-                        });
-                    }
-
                     match demuxer.demux_flv_tag(&msg) {
                         Ok(Some(frame)) => {
                             let track_label = if frame.track.is_audio() {

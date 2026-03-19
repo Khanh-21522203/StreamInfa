@@ -199,24 +199,24 @@ Snapshot (2026-03-19, docker-compose + MinIO, `--features s3,ffmpeg`, k6 0.50.0)
 
 | Case | Description | avg_ms | p50 | p95 | qps |
 |------|-------------|-------:|----:|----:|----:|
-| `list_streams` | GET /api/v1/streams — list all streams | 8.18 | 0.544 | 44.26 | — |
-| `create_delete_stream` | POST + DELETE /api/v1/streams — full create/delete round trip | 27.75 | 46.16 | 88.96 | — |
-| overall | all control requests combined | 13.23 | 0.689 | 48.19 | 247.0 |
+| `list_streams` | GET /api/v1/streams — list all streams | 9.11 | 0.622 | 45.21 | — |
+| `create_delete_stream` | POST + DELETE /api/v1/streams — full create/delete round trip | 27.55 | 46.36 | 52.87 | — |
+| overall | all control requests combined | 13.91 | 0.753 | 48.12 | 246.4 |
 
-**Ingest** (2 VUs, 30s, 262 KB fixture):
+**Ingest** (2 VUs, 30s, 1.1 MB fixture — 30s 1280x720 H.264, real FFmpeg transcode, 2 renditions, veryfast preset):
 
-Each VU uploads a file, polls until the stream reaches READY, then deletes it — one full cycle per iteration (~606ms total, dominated by processing wait). The qps column is **upload cycles/s**, not raw HTTP requests/s.
+Each VU uploads a file, polls until the stream reaches READY, then deletes it. The qps column is **upload cycles/s**, not raw HTTP requests/s. `upload_to_ready` reflects real H.264 decode + libx264 encode to 720p and 480p renditions + fMP4 packaging + S3 write — approximately 9× realtime for a 30-second clip.
 
 | Case | Description | avg_ms | p50 | p95 | cycles/s |
 |------|-------------|-------:|----:|----:|---------:|
-| `upload_request_duration_ms` | Time for the POST /api/v1/streams/upload HTTP response only — server accepted the file but pipeline has not started yet | 1.344 | 1.254 | 2.077 | 3.297 |
-| `upload_to_ready_duration_ms` | Time from upload accepted → stream state reaches READY (full pipeline: transcode + package + S3 write) | 503.3 | 503 | 504 | 3.297 |
+| `upload_request_duration_ms` | Time for the POST /api/v1/streams/upload HTTP response only — server accepted the file but pipeline has not started yet | 4.578 | 4.483 | 5.527 | 0.6 |
+| `upload_to_ready_duration_ms` | Time from upload accepted → stream state reaches READY (full pipeline: FFmpeg transcode + package + S3 write) | 3,292 | 3,514 | 3,515 | 0.6 |
 
 **Delivery** (20 VUs, 30s):
 
 | Case | Description | avg_ms | p50 | p95 | qps |
 |------|-------------|-------:|----:|----:|----:|
-| `http_req_duration` | Each iteration fetches master playlist + media playlist + init segment + one segment | 1.030 | 0.426 | 3.53 | 763.2 |
+| `http_req_duration` | Each iteration fetches master playlist + media playlist + init segment + one segment | 1.37 | 0.294 | 5.59 | 752.8 |
 
 **Soak** (20 delivery + 2 control VUs, 30s):
 

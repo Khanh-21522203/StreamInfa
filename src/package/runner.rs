@@ -90,7 +90,7 @@ pub async fn run_packager(
                 sps,
                 pps,
                 audio_specific_config: segment.audio_data.as_ref().map(|_| {
-                    Bytes::from_static(&[0x12, 0x10]) // placeholder AAC config
+                    aac_audio_specific_config(segment.audio_sample_rate, segment.audio_channels)
                 }),
                 has_audio: segment.audio_data.is_some(),
             };
@@ -295,6 +295,45 @@ async fn write_master_playlist(
     )
     .await
     .map_err(|_| "storage channel closed while writing master playlist".to_string())
+}
+
+/// Build a 2-byte ISO 14496-3 AudioSpecificConfig for AAC-LC.
+///
+/// Encoding:
+/// - audioObjectType = 2 (AAC-LC): bits 31-27 → 5 bits
+/// - samplingFrequencyIndex: bits 26-23 → 4 bits
+/// - channelConfiguration: bits 22-19 → 4 bits
+/// - GASpecificConfig: frameLengthFlag=0, dependsOnCoreCoder=0, extensionFlag=0
+///
+/// Returns a `Bytes` of exactly 2 bytes that can be embedded in the `esds` box.
+fn aac_audio_specific_config(sample_rate: u32, channels: u8) -> Bytes {
+    let audio_object_type: u16 = 2; // AAC-LC
+
+    let freq_index: u16 = match sample_rate {
+        96000 => 0,
+        88200 => 1,
+        64000 => 2,
+        48000 => 3,
+        44100 => 4,
+        32000 => 5,
+        24000 => 6,
+        22050 => 7,
+        16000 => 8,
+        12000 => 9,
+        11025 => 10,
+        8000 => 11,
+        _ => 3, // fallback to 48000
+    };
+
+    let channel_cfg: u16 = channels.clamp(1, 7) as u16;
+
+    // Layout: [audioObjectType(5) | freqIndex(4) | channelConfig(4) | GASpec(3)]
+    //   byte 0: [oot5][oot4][oot3][oot2][oot1] [fi3][fi2][fi1]
+    //   byte 1: [fi0][ch3][ch2][ch1][ch0] [0][0][0]
+    let bits: u16 = (audio_object_type << 11) | (freq_index << 7) | (channel_cfg << 3);
+    let b0 = (bits >> 8) as u8;
+    let b1 = (bits & 0xFF) as u8;
+    Bytes::copy_from_slice(&[b0, b1])
 }
 
 fn extract_avc_parameter_sets(annex_b: &[u8]) -> Option<(Bytes, Bytes)> {

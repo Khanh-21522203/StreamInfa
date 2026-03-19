@@ -8,6 +8,76 @@ use crate::core::types::{AudioCodec, DemuxedFrame, StreamId, Track, VideoCodec};
 use super::rtmp::RtmpMessage;
 
 // ---------------------------------------------------------------------------
+// Exp-Golomb bit reader for H.264 SPS parsing
+// ---------------------------------------------------------------------------
+
+/// Reads individual bits and exp-Golomb coded integers from a byte slice.
+struct BitReader<'a> {
+    data: &'a [u8],
+    byte_pos: usize,
+    /// Bit position within the current byte: 0 = MSB, 7 = LSB.
+    bit_pos: u8,
+}
+
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, byte_pos: 0, bit_pos: 0 }
+    }
+
+    fn read_bit(&mut self) -> Option<u8> {
+        if self.byte_pos >= self.data.len() {
+            return None;
+        }
+        let bit = (self.data[self.byte_pos] >> (7 - self.bit_pos)) & 1;
+        self.bit_pos += 1;
+        if self.bit_pos == 8 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+        Some(bit)
+    }
+
+    fn read_bits(&mut self, n: u32) -> Option<u32> {
+        let mut val = 0u32;
+        for _ in 0..n {
+            val = (val << 1) | (self.read_bit()? as u32);
+        }
+        Some(val)
+    }
+
+    /// Read an exp-Golomb coded unsigned integer.
+    fn read_ue(&mut self) -> Option<u32> {
+        let mut leading_zeros = 0u32;
+        loop {
+            match self.read_bit()? {
+                0 => {
+                    leading_zeros += 1;
+                    if leading_zeros > 31 {
+                        return None; // malformed / overflow guard
+                    }
+                }
+                _ => break,
+            }
+        }
+        if leading_zeros == 0 {
+            return Some(0);
+        }
+        let suffix = self.read_bits(leading_zeros)?;
+        Some((1 << leading_zeros) - 1 + suffix)
+    }
+
+    /// Read an exp-Golomb coded signed integer (zigzag mapped).
+    fn read_se(&mut self) -> Option<i32> {
+        let code = self.read_ue()?;
+        if code & 1 == 1 {
+            Some(((code + 1) >> 1) as i32)
+        } else {
+            Some(-((code >> 1) as i32))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FLV constants (from ingest.md §2.4)
 // ---------------------------------------------------------------------------
 
@@ -93,6 +163,33 @@ impl FlvDemuxer {
     /// (or video-only if no audio is present).
     pub fn has_sequence_header(&self) -> bool {
         self.has_video_seq_header
+    }
+
+    /// Video frame width parsed from the AVC sequence header SPS.
+    /// Returns 0 until `has_sequence_header()` is true.
+    pub fn video_width(&self) -> u32 {
+        self.video_width
+    }
+
+    /// Video frame height parsed from the AVC sequence header SPS.
+    /// Returns 0 until `has_sequence_header()` is true.
+    pub fn video_height(&self) -> u32 {
+        self.video_height
+    }
+
+    /// Audio sample rate parsed from the AudioSpecificConfig.
+    pub fn audio_sample_rate(&self) -> u32 {
+        self.audio_sample_rate
+    }
+
+    /// Number of audio channels parsed from the AudioSpecificConfig.
+    pub fn audio_channels(&self) -> u8 {
+        self.audio_channels
+    }
+
+    /// Detected audio codec, if any audio sequence header has been received.
+    pub fn audio_codec(&self) -> Option<AudioCodec> {
+        self.audio_codec
     }
 
     /// Demux a single RTMP message containing an FLV tag.
@@ -390,20 +487,150 @@ impl FlvDemuxer {
         Ok(())
     }
 
-    /// Simplified SPS dimension parsing.
+    /// Parse H.264 SPS to extract frame dimensions using exp-Golomb decoding.
+    ///
+    /// The SPS NAL unit (sps[0] is the NAL header byte, skipped here) encodes
+    /// `pic_width_in_mbs_minus1` and `pic_height_in_map_units_minus1` as
+    /// exp-Golomb coded fields after several prefix fields. Frame cropping
+    /// offsets are subtracted if `frame_cropping_flag` is set.
     fn parse_sps_dimensions(&mut self, sps: &[u8]) {
-        // Very simplified: for a proper implementation, we'd need a full
-        // H.264 SPS parser with exp-golomb decoding. For now, we use
-        // common resolution detection heuristics.
-        // The SPS contains profile_idc, level_idc, and then exp-golomb coded
-        // fields including pic_width_in_mbs_minus1 and pic_height_in_map_units_minus1.
-        // A full parser is needed for production; this is a placeholder.
-        if sps.len() > 4 {
-            // Default to 1920x1080 if we can't parse (will be overridden by FFmpeg probe)
-            if self.video_width == 0 {
-                self.video_width = 1920;
-                self.video_height = 1080;
+        // sps[0] is the NAL unit header (nal_ref_idc + nal_unit_type=7); skip it.
+        if sps.len() < 4 {
+            return;
+        }
+        let mut r = BitReader::new(&sps[1..]);
+
+        let profile_idc = match r.read_bits(8) {
+            Some(v) => v,
+            None => return,
+        };
+        let _ = r.read_bits(8); // constraint_flags
+        let _ = r.read_bits(8); // level_idc
+        let _ = r.read_ue(); // seq_parameter_set_id
+
+        // High-profile extensions carry extra fields before the common fields.
+        let chroma_format_idc = if matches!(
+            profile_idc,
+            100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134
+        ) {
+            let cf = match r.read_ue() {
+                Some(v) => v,
+                None => return,
+            };
+            if cf == 3 {
+                let _ = r.read_bit(); // separate_colour_plane_flag
             }
+            let _ = r.read_ue(); // bit_depth_luma_minus8
+            let _ = r.read_ue(); // bit_depth_chroma_minus8
+            let _ = r.read_bit(); // qpprime_y_zero_transform_bypass_flag
+            let scaling_present = match r.read_bit() {
+                Some(v) => v,
+                None => return,
+            };
+            if scaling_present == 1 {
+                let num_lists = if cf != 3 { 6usize } else { 8 };
+                for i in 0..num_lists {
+                    let list_present = match r.read_bit() {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    if list_present == 1 {
+                        let size = if i < 6 { 16usize } else { 64 };
+                        let mut last_scale = 8i32;
+                        let mut next_scale = 8i32;
+                        for _ in 0..size {
+                            if next_scale != 0 {
+                                let delta = match r.read_se() {
+                                    Some(v) => v,
+                                    None => return,
+                                };
+                                next_scale = (last_scale + delta + 256) % 256;
+                            }
+                            last_scale = if next_scale == 0 { last_scale } else { next_scale };
+                        }
+                    }
+                }
+            }
+            cf
+        } else {
+            1 // default chroma_format_idc = 1 (4:2:0) for non-high profiles
+        };
+
+        let _ = r.read_ue(); // log2_max_frame_num_minus4
+
+        let poc_type = match r.read_ue() {
+            Some(v) => v,
+            None => return,
+        };
+        if poc_type == 0 {
+            let _ = r.read_ue(); // log2_max_pic_order_cnt_lsb_minus4
+        } else if poc_type == 1 {
+            let _ = r.read_bit(); // delta_pic_order_always_zero_flag
+            let _ = r.read_se(); // offset_for_non_ref_pic
+            let _ = r.read_se(); // offset_for_top_to_bottom_field
+            let n = match r.read_ue() {
+                Some(v) => v,
+                None => return,
+            };
+            for _ in 0..n {
+                let _ = r.read_se(); // offset_for_ref_frame[i]
+            }
+        }
+
+        let _ = r.read_ue(); // max_num_ref_frames
+        let _ = r.read_bit(); // gaps_in_frame_num_value_allowed_flag
+
+        let width_in_mbs = match r.read_ue() {
+            Some(v) => v,
+            None => return,
+        };
+        let height_in_map_units = match r.read_ue() {
+            Some(v) => v,
+            None => return,
+        };
+
+        let frame_mbs_only = match r.read_bit() {
+            Some(v) => v,
+            None => return,
+        };
+        if frame_mbs_only == 0 {
+            let _ = r.read_bit(); // mb_adaptive_frame_field_flag
+        }
+
+        let _ = r.read_bit(); // direct_8x8_inference_flag
+
+        let frame_cropping = match r.read_bit() {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Crop units depend on chroma format.  For 4:2:0 (chroma_format_idc=1),
+        // each crop unit is 2 luma samples horizontally and vertically.
+        let (crop_unit_x, crop_unit_y) = if chroma_format_idc == 0 {
+            (1u32, 2 - frame_mbs_only as u32)
+        } else {
+            // 4:2:0 and 4:2:2 / 4:4:4 are all handled conservatively as 2x2 or 1x2.
+            // 4:2:0 (most common): CropUnitX=2, CropUnitY=2*(2-frame_mbs_only)
+            (2u32, 2 * (2 - frame_mbs_only as u32))
+        };
+
+        let (crop_l, crop_r, crop_t, crop_b) = if frame_cropping == 1 {
+            let l = r.read_ue().unwrap_or(0);
+            let rr = r.read_ue().unwrap_or(0);
+            let t = r.read_ue().unwrap_or(0);
+            let b = r.read_ue().unwrap_or(0);
+            (l, rr, t, b)
+        } else {
+            (0, 0, 0, 0)
+        };
+
+        let width = (width_in_mbs + 1) * 16 - crop_unit_x * (crop_l + crop_r);
+        let height =
+            (2 - frame_mbs_only as u32) * (height_in_map_units + 1) * 16 - crop_unit_y * (crop_t + crop_b);
+
+        if width > 0 && height > 0 {
+            self.video_width = width;
+            self.video_height = height;
         }
     }
 
@@ -502,6 +729,43 @@ impl FlvDemuxer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_sps_dimensions_1280x720() {
+        let mut demuxer = FlvDemuxer::new(StreamId::new());
+
+        // Real SPS NALU for a 1280x720 H.264 Baseline stream.
+        // NAL header 0x67 (nal_ref_idc=3, nal_unit_type=7 SPS), followed by:
+        //   profile_idc=66 (Baseline), constraint_flags=0xE0, level_idc=31
+        //   seq_parameter_set_id=0 (ue=0)
+        //   log2_max_frame_num_minus4=0 (ue=0)
+        //   pic_order_cnt_type=0 (ue=0)
+        //   log2_max_pic_order_cnt_lsb_minus4=4 (ue=4)
+        //   max_num_ref_frames=1 (ue=1)
+        //   gaps_in_frame_num_value_allowed_flag=0
+        //   pic_width_in_mbs_minus1=79 (ue=79) → width = 80*16 = 1280
+        //   pic_height_in_map_units_minus1=44 (ue=44) → height = 45*16 = 720
+        //   frame_mbs_only_flag=1
+        //   direct_8x8_inference_flag=0
+        //   frame_cropping_flag=0
+        // This byte sequence was captured from a real encoder.
+        let sps: &[u8] = &[
+            0x67, 0x42, 0xE0, 0x1F, 0xDA, 0x01, 0x40, 0x16, 0xEC, 0x04, 0x40, 0x00, 0x00, 0x03,
+            0x00, 0x40, 0x00, 0x00, 0x0F, 0x03, 0xC6, 0x0C, 0x65, 0x80,
+        ];
+        demuxer.parse_sps_dimensions(sps);
+        assert_eq!(demuxer.video_width, 1280, "width should be 1280");
+        assert_eq!(demuxer.video_height, 720, "height should be 720");
+    }
+
+    #[test]
+    fn test_parse_sps_dimensions_too_short() {
+        let mut demuxer = FlvDemuxer::new(StreamId::new());
+        // Too short to parse — should leave width/height at 0.
+        demuxer.parse_sps_dimensions(&[0x67, 0x42]);
+        assert_eq!(demuxer.video_width, 0);
+        assert_eq!(demuxer.video_height, 0);
+    }
 
     #[test]
     fn test_normalize_pts() {

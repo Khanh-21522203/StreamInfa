@@ -262,6 +262,10 @@ pub struct EncodedSegment {
     pub video_data: Bytes,
     /// Encoded AAC frames for this segment (None if no audio).
     pub audio_data: Option<Bytes>,
+    /// Audio sample rate in Hz (e.g. 48000), used to derive AudioSpecificConfig.
+    pub audio_sample_rate: u32,
+    /// Number of audio channels (e.g. 2 for stereo), used to derive AudioSpecificConfig.
+    pub audio_channels: u8,
     /// True if this is the final segment (stream ended).
     pub is_last: bool,
     /// Rendition output width (from profile ladder selection).

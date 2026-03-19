@@ -69,6 +69,10 @@ pub struct SegmentAccumulator {
     next_sequence: u64,
     /// Whether we have any audio data.
     has_audio: bool,
+    /// Audio sample rate in Hz, captured from the first audio packet.
+    audio_sample_rate: u32,
+    /// Number of audio channels, captured from the first audio packet.
+    audio_channels: u8,
     /// Rendition output width.
     width: u32,
     /// Rendition output height.
@@ -112,6 +116,8 @@ impl SegmentAccumulator {
             last_pts: 0,
             next_sequence: 0,
             has_audio: false,
+            audio_sample_rate: 48000, // updated on first audio packet via set_audio_params()
+            audio_channels: 2,
             width,
             height,
             video_bitrate_kbps,
@@ -120,6 +126,16 @@ impl SegmentAccumulator {
             level,
             frame_rate,
         }
+    }
+
+    /// Update audio parameters from the source stream.
+    ///
+    /// Call this once when the first audio packet is received so that the
+    /// emitted `EncodedSegment` carries the correct sample rate and channel
+    /// count for `AudioSpecificConfig` generation in the packager.
+    pub fn set_audio_params(&mut self, sample_rate: u32, channels: u8) {
+        self.audio_sample_rate = sample_rate;
+        self.audio_channels = channels;
     }
 
     /// Feed an encoded packet into the accumulator.
@@ -181,6 +197,8 @@ impl SegmentAccumulator {
             } else {
                 None
             },
+            audio_sample_rate: self.audio_sample_rate,
+            audio_channels: self.audio_channels,
             is_last,
             width: self.width,
             height: self.height,

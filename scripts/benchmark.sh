@@ -18,7 +18,7 @@ INGEST_UPLOAD_VUS="${INGEST_UPLOAD_VUS:-2}"
 INGEST_READY_TIMEOUT_SECS="${INGEST_READY_TIMEOUT_SECS:-120}"
 INGEST_POLL_INTERVAL_MS="${INGEST_POLL_INTERVAL_MS:-500}"
 DELIVERY_STREAM_ID="${DELIVERY_STREAM_ID:-}"
-DELIVERY_RENDITION="${DELIVERY_RENDITION:-high}"
+DELIVERY_RENDITION="${DELIVERY_RENDITION:-medium}"
 DELIVERY_SEGMENT="${DELIVERY_SEGMENT:-000000.m4s}"
 DELIVERY_USE_RANGE="${DELIVERY_USE_RANGE:-1}"
 AUTO_PREPARE_DELIVERY="${AUTO_PREPARE_DELIVERY:-1}"
@@ -134,6 +134,32 @@ json_field() {
 ensure_upload_fixture() {
     mkdir -p "$(dirname "${UPLOAD_FIXTURE_HOST}")"
 
+    # If ffmpeg is available, generate a real H.264 MP4 that FFmpeg can transcode.
+    # Only regenerate if the file is missing or still the old fake placeholder
+    # (fake placeholder = ftypisom header followed by zeros, probe fails).
+    if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+        # Check if existing file is a valid, probe-able video.
+        local probe_ok=0
+        if [[ -f "${UPLOAD_FIXTURE_HOST}" ]]; then
+            ffprobe -v quiet -select_streams v:0 -show_entries stream=codec_name \
+                -of default=noprint_wrappers=1:nokey=1 "${UPLOAD_FIXTURE_HOST}" 2>/dev/null \
+                | grep -q "h264" && probe_ok=1
+        fi
+        if [[ "${probe_ok}" -eq 1 ]]; then
+            return
+        fi
+        echo "Generating real H.264 fixture: ${UPLOAD_FIXTURE_HOST} (30s 1280x720)"
+        ffmpeg -y \
+            -f lavfi -i "testsrc=duration=30:size=1280x720:rate=30" \
+            -f lavfi -i "sine=frequency=440:duration=30" \
+            -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p \
+            -c:a aac -b:a 128k \
+            -movflags +faststart \
+            "${UPLOAD_FIXTURE_HOST}" 2>/dev/null
+        return
+    fi
+
+    # Fallback: synthetic placeholder (no real video, only works with placeholder transcoding).
     if [[ "${UPLOAD_SAMPLE_SIZE_BYTES}" -lt 12 ]]; then
         echo "ERROR: UPLOAD_SAMPLE_SIZE_BYTES must be >= 12" >&2
         exit 1
@@ -148,7 +174,7 @@ ensure_upload_fixture() {
         return
     fi
 
-    echo "Generating upload fixture: ${UPLOAD_FIXTURE_HOST} (${UPLOAD_SAMPLE_SIZE_BYTES} bytes)"
+    echo "Generating placeholder fixture: ${UPLOAD_FIXTURE_HOST} (${UPLOAD_SAMPLE_SIZE_BYTES} bytes)"
     : > "${UPLOAD_FIXTURE_HOST}"
     printf '\x00\x00\x00\x18ftypisom' > "${UPLOAD_FIXTURE_HOST}"
     if [[ "${UPLOAD_SAMPLE_SIZE_BYTES}" -gt 12 ]]; then

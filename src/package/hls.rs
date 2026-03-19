@@ -487,11 +487,20 @@ fn build_trun(buf: &mut BytesMut, params: &MediaSegmentParams) -> Result<(), Pac
     //        | sample-flags-present | sample-composition-time-offsets-present
     let flags: u32 = 0x000001 | 0x000100 | 0x000200 | 0x000400 | 0x000800;
 
+    let sample_count = params.samples.len() as u32;
+
+    // data_offset is the byte offset from the start of the moof box to the first
+    // sample byte in mdat. The moof box size is fixed given sample_count:
+    //   moof = 8 + mfhd(16) + traf(8 + tfhd(16) + tfdt(20) + trun(20 + sample_count*16))
+    //        = 8 + 16 + 8 + 16 + 20 + 20 + sample_count*16
+    //        = 88 + sample_count * 16
+    // Then +8 for the mdat box header (size + type fields).
+    let moof_size: i32 = 88 + (sample_count as i32) * 16;
+    let data_offset: i32 = moof_size + 8;
+
     let mut content = BytesMut::new();
-    content.put_u32(params.samples.len() as u32); // sample_count
-                                                  // data_offset: placeholder (will be the offset from moof start to mdat data)
-                                                  // For simplicity, we write 0 and note this needs fixing in production
-    content.put_i32(0); // data_offset (placeholder)
+    content.put_u32(sample_count);
+    content.put_i32(data_offset);
 
     for sample in &params.samples {
         content.put_u32(sample.duration);

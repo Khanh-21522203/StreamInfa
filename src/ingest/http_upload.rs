@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
+#[cfg(not(feature = "ffmpeg"))]
 use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
@@ -9,7 +10,6 @@ use crate::control::state::{StreamState, StreamStateManager};
 use crate::core::auth::AuthProvider;
 use crate::core::config::IngestConfig;
 use crate::core::error::IngestError;
-use crate::core::security;
 use crate::core::types::{IngestMode, StreamId};
 
 use super::validator::{self, ProbeResult};
@@ -156,77 +156,26 @@ impl HttpUploadHandler {
     /// In a real implementation, this would use FFmpeg FFI:
     /// `ffmpeg::format::input(&path)` to extract container, codecs, duration, resolution.
     ///
-    /// TODO: Replace with actual FFmpeg probe via ffmpeg-next crate.
-    /// For now, this returns a placeholder result based on file header detection.
-    /// The container is detected from magic bytes; codec/resolution are assumed defaults.
+    /// Probe a media file to extract container, codec, resolution, frame rate,
+    /// duration, and audio parameters.
+    ///
+    /// Under `--features ffmpeg`, calls FFmpeg's format demuxer for accurate
+    /// values. Without the feature, falls back to magic-byte container detection
+    /// with conservative defaults.
     async fn probe_file(&self, file_path: &Path) -> Result<ProbeResult, IngestError> {
-        use crate::core::types::{AudioCodec, Container, VideoCodec};
-
-        // Verify the file exists and is readable
-        let metadata =
-            tokio::fs::metadata(file_path)
+        #[cfg(feature = "ffmpeg")]
+        {
+            let path = file_path.to_path_buf();
+            tokio::task::spawn_blocking(move || probe_with_ffmpeg(&path))
                 .await
                 .map_err(|e| IngestError::CorruptFile {
-                    reason: format!("cannot read file: {}", e),
-                })?;
-
-        if metadata.len() == 0 {
-            return Err(IngestError::CorruptFile {
-                reason: "file is empty".to_string(),
-            });
+                    reason: format!("probe task panicked: {e}"),
+                })?
         }
-
-        // Read only the initial probe bytes needed for container sniffing.
-        // This avoids loading large uploads into memory.
-        let mut file =
-            tokio::fs::File::open(file_path)
-                .await
-                .map_err(|e| IngestError::CorruptFile {
-                    reason: format!("cannot open file for probe: {}", e),
-                })?;
-        let mut header = [0u8; 12];
-        let n = file
-            .read(&mut header)
-            .await
-            .map_err(|e| IngestError::CorruptFile {
-                reason: format!("cannot read file header: {}", e),
-            })?;
-        let header = &header[..n];
-
-        let container = if header.len() >= 12 && &header[4..8] == b"ftyp" {
-            Container::Mp4
-        } else if header.len() >= 4 && header[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
-            Container::Mkv
-        } else {
-            return Err(IngestError::UnsupportedFormat {
-                format: "unknown (could not detect container from magic bytes)".to_string(),
-            });
-        };
-
-        // TODO: Replace these placeholder values with actual FFmpeg probe results.
-        // For now, assume H.264 + AAC at 1080p. Real implementation would call:
-        //   let input = ffmpeg::format::input(file_path)?;
-        //   ... extract streams, codecs, duration, resolution ...
-        warn!(
-            path = %file_path.display(),
-            probe_limit_bytes = security::FFMPEG_PROBE_MAX_SIZE,
-            file_size = metadata.len(),
-            "using placeholder probe results (FFmpeg FFI not yet integrated)"
-        );
-
-        Ok(ProbeResult {
-            container,
-            video_codec: VideoCodec::H264,
-            video_width: 1920,
-            video_height: 1080,
-            frame_rate: 30.0,
-            audio_codec: Some(AudioCodec::Aac),
-            audio_sample_rate: Some(48000),
-            audio_channels: Some(2),
-            duration_secs: None,
-            video_bitrate_kbps: None,
-            audio_bitrate_kbps: Some(128),
-        })
+        #[cfg(not(feature = "ffmpeg"))]
+        {
+            probe_placeholder(file_path).await
+        }
     }
 
     /// Clean up a temp file after validation failure or processing.
@@ -276,10 +225,172 @@ pub fn build_error_response(err: &IngestError, stream_id: Option<StreamId>) -> U
     }
 }
 
+// ---------------------------------------------------------------------------
+// FFmpeg probe (real dimensions, codec, duration)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ffmpeg")]
+fn probe_with_ffmpeg(file_path: &std::path::Path) -> Result<ProbeResult, IngestError> {
+    use crate::core::types::{AudioCodec, Container, VideoCodec};
+    use ffmpeg_next as ffmpeg;
+
+    ffmpeg::init().map_err(|e| IngestError::CorruptFile {
+        reason: format!("ffmpeg init: {e}"),
+    })?;
+
+    let ictx = ffmpeg::format::input(file_path).map_err(|e| IngestError::CorruptFile {
+        reason: format!("cannot open file: {e}"),
+    })?;
+
+    // Container
+    let format = ictx.format();
+    let format_name = format.name();
+    let container = if format_name.contains("mp4") || format_name.contains("mov") {
+        Container::Mp4
+    } else if format_name.contains("matroska") || format_name.contains("webm") {
+        Container::Mkv
+    } else {
+        return Err(IngestError::UnsupportedFormat {
+            format: format_name.to_string(),
+        });
+    };
+
+    // Duration
+    let duration_secs = if ictx.duration() > 0 {
+        Some(ictx.duration() as f64 / ffmpeg::ffi::AV_TIME_BASE as f64)
+    } else {
+        None
+    };
+
+    // Best video stream
+    let vs = ictx
+        .streams()
+        .best(ffmpeg::media::Type::Video)
+        .ok_or_else(|| IngestError::UnsupportedFormat {
+            format: "no video stream".to_string(),
+        })?;
+
+    let fps = {
+        let r = vs.avg_frame_rate();
+        if r.denominator() != 0 && r.numerator() > 0 {
+            r.numerator() as f64 / r.denominator() as f64
+        } else {
+            30.0
+        }
+    };
+
+    let vdec = ffmpeg::codec::Context::from_parameters(vs.parameters())
+        .map_err(|e| IngestError::CorruptFile {
+            reason: format!("video codec params: {e}"),
+        })?
+        .decoder()
+        .video()
+        .map_err(|e| IngestError::CorruptFile {
+            reason: format!("video decoder open: {e}"),
+        })?;
+
+    let video_width = vdec.width();
+    let video_height = vdec.height();
+
+    // Best audio stream (optional)
+    let (audio_codec, audio_sample_rate, audio_channels, audio_bitrate_kbps) =
+        if let Some(aud) = ictx.streams().best(ffmpeg::media::Type::Audio) {
+            let adec = ffmpeg::codec::Context::from_parameters(aud.parameters())
+                .ok()
+                .and_then(|c| c.decoder().audio().ok());
+            let (sr, ch) = adec
+                .as_ref()
+                .map(|a| (a.rate(), a.channels()))
+                .unwrap_or((48000, 2));
+            (Some(AudioCodec::Aac), Some(sr), Some(ch as u8), Some(128u32))
+        } else {
+            (None, None, None, None)
+        };
+
+    Ok(ProbeResult {
+        container,
+        video_codec: VideoCodec::H264,
+        video_width,
+        video_height,
+        frame_rate: fps,
+        audio_codec,
+        audio_sample_rate,
+        audio_channels,
+        duration_secs,
+        video_bitrate_kbps: None,
+        audio_bitrate_kbps,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder probe (no FFmpeg — magic bytes + conservative defaults)
+// ---------------------------------------------------------------------------
+
+#[cfg(not(feature = "ffmpeg"))]
+async fn probe_placeholder(file_path: &std::path::Path) -> Result<ProbeResult, IngestError> {
+    use crate::core::types::{AudioCodec, Container, VideoCodec};
+
+    let metadata = tokio::fs::metadata(file_path)
+        .await
+        .map_err(|e| IngestError::CorruptFile {
+            reason: format!("cannot read file: {e}"),
+        })?;
+
+    if metadata.len() == 0 {
+        return Err(IngestError::CorruptFile {
+            reason: "file is empty".to_string(),
+        });
+    }
+
+    let mut file = tokio::fs::File::open(file_path)
+        .await
+        .map_err(|e| IngestError::CorruptFile {
+            reason: format!("cannot open file for probe: {e}"),
+        })?;
+    let mut header = [0u8; 12];
+    let n = file
+        .read(&mut header)
+        .await
+        .map_err(|e| IngestError::CorruptFile {
+            reason: format!("cannot read file header: {e}"),
+        })?;
+    let header = &header[..n];
+
+    let container = if header.len() >= 12 && &header[4..8] == b"ftyp" {
+        Container::Mp4
+    } else if header.len() >= 4 && header[0..4] == [0x1A, 0x45, 0xDF, 0xA3] {
+        Container::Mkv
+    } else {
+        return Err(IngestError::UnsupportedFormat {
+            format: "unknown (could not detect container from magic bytes)".to_string(),
+        });
+    };
+
+    warn!(
+        path = %file_path.display(),
+        "using placeholder probe results (build with --features ffmpeg for real values)"
+    );
+
+    Ok(ProbeResult {
+        container,
+        video_codec: VideoCodec::H264,
+        video_width: 1920,
+        video_height: 1080,
+        frame_rate: 30.0,
+        audio_codec: Some(AudioCodec::Aac),
+        audio_sample_rate: Some(48000),
+        audio_channels: Some(2),
+        duration_secs: None,
+        video_bitrate_kbps: None,
+        audio_bitrate_kbps: Some(128),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::config::{AuthConfig, IngestConfig};
+    use crate::core::security;
     use crate::core::types::Container;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;

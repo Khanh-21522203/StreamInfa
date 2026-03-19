@@ -4,6 +4,7 @@ use axum::response::{IntoResponse, Json, Response};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(not(feature = "ffmpeg"))]
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, error, info};
@@ -14,8 +15,10 @@ static X_STREAMINFA_STREAM_ID: HeaderName = HeaderName::from_static("x-streaminf
 use crate::control::state::StreamState;
 use crate::core::auth::TokenStatus;
 use crate::core::security::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT};
+use crate::core::types::{IngestMode, StreamId};
+#[cfg(not(feature = "ffmpeg"))]
 use crate::core::types::{
-    DemuxedFrame, IngestMode, StreamId, Track, VideoCodec, INGEST_TRANSCODE_CHANNEL_CAP,
+    DemuxedFrame, Track, VideoCodec, INGEST_TRANSCODE_CHANNEL_CAP,
 };
 use crate::observability::metrics as obs;
 use crate::storage::MediaStore;
@@ -1528,8 +1531,13 @@ fn start_vod_pipeline_from_file(
     let transcode_state_mgr = state.state_manager.clone();
     let transcode_cancel = pipeline.cancel.clone();
     let transcode_segment_tx = pipeline.transcode_tx;
-    let transcode_frame_rx = pipeline.ingest_rx;
     let transcode_event_tx = state.event_tx.clone();
+
+    // ------------------------------------------------------------------
+    // Transcode task — FFmpeg reads directly from the file via its own
+    // container demuxer; no ingest channel needed.
+    // ------------------------------------------------------------------
+    #[cfg(feature = "ffmpeg")]
     tokio::spawn(async move {
         let tp = crate::transcode::pipeline::TranscodePipeline::new(
             transcode_config,
@@ -1537,12 +1545,12 @@ fn start_vod_pipeline_from_file(
             transcode_cancel,
         );
         if let Err(e) = tp
-            .run_live(
+            .run_vod_from_file(
                 stream_id,
+                temp_path,
                 source_width,
                 source_height,
                 source_fps,
-                transcode_frame_rx,
                 transcode_segment_tx,
             )
             .await
@@ -1556,6 +1564,40 @@ fn start_vod_pipeline_from_file(
                 .await;
         }
     });
+
+    // ------------------------------------------------------------------
+    // Transcode task — placeholder passthrough via the ingest channel.
+    // ------------------------------------------------------------------
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let transcode_frame_rx = pipeline.ingest_rx;
+        tokio::spawn(async move {
+            let tp = crate::transcode::pipeline::TranscodePipeline::new(
+                transcode_config,
+                transcode_state_mgr,
+                transcode_cancel,
+            );
+            if let Err(e) = tp
+                .run_live(
+                    stream_id,
+                    source_width,
+                    source_height,
+                    source_fps,
+                    transcode_frame_rx,
+                    transcode_segment_tx,
+                )
+                .await
+            {
+                tracing::error!(%stream_id, error = %e, "VOD transcode pipeline failed");
+                let _ = transcode_event_tx
+                    .send(crate::control::events::PipelineEvent::StreamError {
+                        stream_id,
+                        error: e.to_string(),
+                    })
+                    .await;
+            }
+        });
+    }
 
     let packaging_config = state.config.packaging.clone();
     let packager_event_tx = state.event_tx.clone();
@@ -1588,32 +1630,40 @@ fn start_vod_pipeline_from_file(
         .await;
     });
 
-    let feeder_ingest_tx = pipeline.ingest_tx;
-    let feeder_event_tx = state.event_tx.clone();
-    let feeder_cancel = pipeline.cancel.clone();
-    tokio::spawn(async move {
-        if let Err(e) = feed_vod_file_to_pipeline(
-            stream_id,
-            temp_path,
-            source_width,
-            source_height,
-            feeder_ingest_tx,
-            feeder_event_tx.clone(),
-            feeder_cancel,
-        )
-        .await
-        {
-            error!(%stream_id, error = %e, "VOD file feeder failed");
-            let _ = feeder_event_tx
-                .send(crate::control::events::PipelineEvent::StreamError {
-                    stream_id,
-                    error: e,
-                })
-                .await;
-        }
-    });
+    // ------------------------------------------------------------------
+    // File feeder — only needed for the placeholder path; FFmpeg path
+    // reads the file directly inside transcode_vod_from_file_blocking.
+    // ------------------------------------------------------------------
+    #[cfg(not(feature = "ffmpeg"))]
+    {
+        let feeder_ingest_tx = pipeline.ingest_tx;
+        let feeder_event_tx = state.event_tx.clone();
+        let feeder_cancel = pipeline.cancel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = feed_vod_file_to_pipeline(
+                stream_id,
+                temp_path,
+                source_width,
+                source_height,
+                feeder_ingest_tx,
+                feeder_event_tx.clone(),
+                feeder_cancel,
+            )
+            .await
+            {
+                error!(%stream_id, error = %e, "VOD file feeder failed");
+                let _ = feeder_event_tx
+                    .send(crate::control::events::PipelineEvent::StreamError {
+                        stream_id,
+                        error: e,
+                    })
+                    .await;
+            }
+        });
+    }
 }
 
+#[cfg(not(feature = "ffmpeg"))]
 async fn feed_vod_file_to_pipeline(
     stream_id: StreamId,
     temp_path: PathBuf,

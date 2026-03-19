@@ -96,10 +96,13 @@ pub fn build_router(
         }
     };
 
-    // JSON body size limit (from security.md §4.3: ≤ 1 MB)
+    // JSON body size limit for control + delivery routes (security.md §4.3: ≤ 1 MB).
+    // The upload route is in a separate inner router so it never passes through this limit —
+    // DefaultBodyLimit::max() wraps the body immediately and cannot be undone by inner layers.
+    // The upload handler enforces max_upload_size_bytes itself.
     let body_limit = DefaultBodyLimit::max(security_config.max_json_body_bytes);
 
-    Router::new()
+    let limited_routes = Router::new()
         // Control plane API
         .route(
             "/api/v1/streams",
@@ -109,7 +112,6 @@ pub fn build_router(
             "/api/v1/streams/{stream_id}",
             get(handlers::get_stream).delete(handlers::delete_stream),
         )
-        .route("/api/v1/streams/upload", post(handlers::upload_vod))
         .route(
             "/api/v1/streams/{stream_id}/rotate-key",
             post(handlers::rotate_stream_key),
@@ -136,8 +138,18 @@ pub fn build_router(
             "/streams/{stream_id}/{rendition}/{segment}",
             get(handlers::serve_segment),
         )
+        .layer(body_limit);
+
+    Router::new()
+        .merge(limited_routes)
+        // Explicitly disable the body limit for upload — without this, Axum's
+        // with_limited_body() falls back to a 2 MB hard default even with no layer applied.
+        // The handler enforces max_upload_size_bytes instead.
+        .route(
+            "/api/v1/streams/upload",
+            post(handlers::upload_vod).layer(DefaultBodyLimit::disable()),
+        )
         .layer(cors)
-        .layer(body_limit)
         // Request ID middleware (from observability.md §9.1)
         .layer(RequestIdLayer)
         .with_state(state)
