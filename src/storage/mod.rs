@@ -83,6 +83,17 @@ pub trait MediaStore: Send + Sync {
     ) -> impl std::future::Future<Output = Result<ObjectMeta, StorageError>> + Send;
 }
 
+/// Application storage backend type.
+///
+/// Default build uses in-memory storage for local development and tests.
+/// When compiled with `--features s3`, this aliases to `S3MediaStore`.
+#[cfg(feature = "s3")]
+pub type AppMediaStore = s3::S3MediaStore;
+
+/// Application storage backend type for non-`s3` builds.
+#[cfg(not(feature = "s3"))]
+pub type AppMediaStore = memory::InMemoryMediaStore;
+
 // ---------------------------------------------------------------------------
 // Storage types (from storage-and-delivery.md §4)
 // ---------------------------------------------------------------------------

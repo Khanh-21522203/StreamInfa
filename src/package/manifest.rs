@@ -84,7 +84,7 @@ pub fn generate_multivariant_playlist(renditions: &[RenditionInfo], hls_version:
 /// - `#EXT-X-MAP`: points to init.mp4
 /// - `#EXTINF`: actual duration, 3 decimal places
 /// - Live: sliding window of N segments
-/// - VOD: complete playlist with `#EXT-X-ENDLIST`
+/// - VOD: complete playlist with `#EXT-X-ENDLIST` only once processing is finished
 pub fn generate_media_playlist(
     segments: &[PlaylistSegment],
     hls_version: u32,
@@ -129,8 +129,10 @@ pub fn generate_media_playlist(
         playlist.push_str(&format!("{}\n", segment.filename));
     }
 
-    // VOD or finished live streams get #EXT-X-ENDLIST
-    if is_vod || is_finished {
+    // Emit ENDLIST only when the rendition is finished.
+    // For VOD we update playlists incrementally while packaging, so adding ENDLIST
+    // too early would make players treat the rendition as complete.
+    if is_finished {
         playlist.push_str("#EXT-X-ENDLIST\n");
     }
 
@@ -285,6 +287,20 @@ mod tests {
         assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
         assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0"));
         assert!(playlist.contains("#EXT-X-ENDLIST"));
+    }
+
+    #[test]
+    fn test_vod_playlist_in_progress_has_no_endlist() {
+        let segments = vec![PlaylistSegment {
+            sequence: 0,
+            duration_secs: 6.0,
+            filename: "000000.m4s".to_string(),
+            program_date_time: None,
+        }];
+
+        let playlist = generate_media_playlist(&segments, 7, true, false);
+        assert!(playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"));
+        assert!(!playlist.contains("#EXT-X-ENDLIST"));
     }
 
     #[test]

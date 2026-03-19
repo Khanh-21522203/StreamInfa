@@ -7,7 +7,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::core::config::{DeliveryConfig, SecurityConfig};
 use crate::storage::cache::ObjectCache;
-use crate::storage::memory::InMemoryMediaStore;
+use crate::storage::AppMediaStore;
 
 use super::handlers;
 use super::middleware::RequestIdLayer;
@@ -18,11 +18,10 @@ use super::middleware::RequestIdLayer;
 
 /// Application state shared across all handlers.
 ///
-/// Uses `InMemoryMediaStore` for MVP. When the `s3` feature is enabled,
-/// this can be swapped to `S3MediaStore` (same `MediaStore` trait).
+/// Uses the configured application storage backend.
 #[derive(Clone)]
 pub struct AppState {
-    pub store: Arc<InMemoryMediaStore>,
+    pub store: Arc<AppMediaStore>,
     pub cache: Arc<ObjectCache>,
     pub state_manager: Arc<crate::control::state::StreamStateManager>,
     pub auth: Arc<crate::core::auth::AuthProvider>,
@@ -66,8 +65,7 @@ pub fn build_router(
         "delivery configuration loaded"
     );
     // CORS layer (from storage-and-delivery.md §6.6, security.md §5.3)
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
+    let cors_base = CorsLayer::new()
         .allow_methods([http::Method::GET, http::Method::HEAD, http::Method::OPTIONS])
         .allow_headers([http::header::RANGE])
         .expose_headers([
@@ -76,6 +74,27 @@ pub fn build_router(
             http::header::ACCEPT_RANGES,
         ])
         .max_age(std::time::Duration::from_secs(86400));
+    let cors = if delivery_config
+        .cors_allowed_origins
+        .iter()
+        .any(|o| o == "*")
+    {
+        cors_base.allow_origin(Any)
+    } else {
+        let mut parsed = Vec::new();
+        for origin in &delivery_config.cors_allowed_origins {
+            match origin.parse::<http::HeaderValue>() {
+                Ok(v) => parsed.push(v),
+                Err(_) => tracing::warn!(origin = %origin, "ignoring invalid CORS origin"),
+            }
+        }
+        if parsed.is_empty() {
+            tracing::warn!("no valid CORS origins configured; falling back to wildcard");
+            cors_base.allow_origin(Any)
+        } else {
+            cors_base.allow_origin(parsed)
+        }
+    };
 
     // JSON body size limit (from security.md §4.3: ≤ 1 MB)
     let body_limit = DefaultBodyLimit::max(security_config.max_json_body_bytes);

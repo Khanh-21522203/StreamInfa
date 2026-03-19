@@ -12,7 +12,7 @@ use streaminfa::core::shutdown::ShutdownCoordinator;
 use streaminfa::delivery::router::{self, AppState};
 use streaminfa::observability::metrics as obs_metrics;
 use streaminfa::storage::cache::ObjectCache;
-use streaminfa::storage::memory::InMemoryMediaStore;
+use streaminfa::storage::AppMediaStore;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -56,9 +56,23 @@ async fn main() -> ExitCode {
     let auth = Arc::new(streaminfa::core::auth::AuthProvider::new(&config.auth));
     let cache = Arc::new(ObjectCache::new(&config.cache));
 
-    // Initialize storage backend
-    // For development, use InMemoryMediaStore. In production, use S3MediaStore.
-    let store: Arc<InMemoryMediaStore> = Arc::new(InMemoryMediaStore::new());
+    // Initialize storage backend.
+    let store: Arc<AppMediaStore> = {
+        #[cfg(feature = "s3")]
+        {
+            match streaminfa::storage::s3::S3MediaStore::new(&config.storage).await {
+                Ok(s3) => Arc::new(s3),
+                Err(e) => {
+                    eprintln!("failed to initialize S3 media store: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        #[cfg(not(feature = "s3"))]
+        {
+            Arc::new(streaminfa::storage::memory::InMemoryMediaStore::new())
+        }
+    };
 
     // Create pipeline event channel (data plane → control plane)
     let (event_tx, event_rx) = events::create_event_channel();
@@ -303,69 +317,69 @@ async fn run_config_reload_task(
         info!("SIGHUP config reload is not supported on this platform");
         cancel.cancelled().await;
         info!("config reload task shutting down");
-        return;
     }
 
     #[cfg(unix)]
     {
-    let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = %e, "failed to install SIGHUP handler, config reload disabled");
-            return;
-        }
-    };
-
-    info!("SIGHUP config reload task started");
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("config reload task shutting down");
+        let mut sighup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to install SIGHUP handler, config reload disabled");
                 return;
             }
-            _ = sighup.recv() => {
-                info!("received SIGHUP, reloading configuration");
-                match AppConfig::load() {
-                    Ok(new_config) => {
-                        // Hot-reloadable: auth tokens (control-plane-vs-data-plane.md §6.1)
-                        auth.update_stream_keys(new_config.auth.ingest_stream_keys);
-                        auth.update_admin_tokens(new_config.auth.admin_bearer_tokens);
+        };
 
-                        // Hot-reloadable: log level (control-plane-vs-data-plane.md §6.1)
-                        // Note: tracing-subscriber's reload handle would be ideal here,
-                        // but for now we log the new level. A full implementation would
-                        // use a reload::Handle<EnvFilter>.
-                        info!(
-                            new_log_level = %new_config.observability.log_level,
-                            "log level reload requested (takes effect on next process start)"
-                        );
+        info!("SIGHUP config reload task started");
 
-                        // Hot-reloadable: CORS origins (control-plane-vs-data-plane.md §6.1)
-                        // CORS layer is set at router build time; new origins take effect
-                        // only when the HTTP server is restarted. Log for operator awareness.
-                        info!(
-                            cors_origins = ?new_config.delivery.cors_allowed_origins,
-                            "CORS origins updated in config (requires restart for HTTP server)"
-                        );
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("config reload task shutting down");
+                    return;
+                }
+                _ = sighup.recv() => {
+                    info!("received SIGHUP, reloading configuration");
+                    match AppConfig::load() {
+                        Ok(new_config) => {
+                            // Hot-reloadable: auth tokens (control-plane-vs-data-plane.md §6.1)
+                            auth.update_stream_keys(new_config.auth.ingest_stream_keys);
+                            auth.update_admin_tokens(new_config.auth.admin_bearer_tokens);
 
-                        // Hot-reloadable: profile ladder for NEW streams
-                        info!(
-                            profiles = new_config.transcode.profile_ladder.len(),
-                            "transcode profile ladder updated for new streams"
-                        );
+                            // Hot-reloadable: log level (control-plane-vs-data-plane.md §6.1)
+                            // Note: tracing-subscriber's reload handle would be ideal here,
+                            // but for now we log the new level. A full implementation would
+                            // use a reload::Handle<EnvFilter>.
+                            info!(
+                                new_log_level = %new_config.observability.log_level,
+                                "log level reload requested (takes effect on next process start)"
+                            );
 
-                        streaminfa::observability::metrics::inc_config_reload("success");
-                        info!("configuration reloaded successfully");
-                    }
-                    Err(e) => {
-                        streaminfa::observability::metrics::inc_config_reload("failure");
-                        error!(error = %e, "failed to reload configuration on SIGHUP, keeping current config");
+                            // Hot-reloadable: CORS origins (control-plane-vs-data-plane.md §6.1)
+                            // CORS layer is set at router build time; new origins take effect
+                            // only when the HTTP server is restarted. Log for operator awareness.
+                            info!(
+                                cors_origins = ?new_config.delivery.cors_allowed_origins,
+                                "CORS origins updated in config (requires restart for HTTP server)"
+                            );
+
+                            // Hot-reloadable: profile ladder for NEW streams
+                            info!(
+                                profiles = new_config.transcode.profile_ladder.len(),
+                                "transcode profile ladder updated for new streams"
+                            );
+
+                            streaminfa::observability::metrics::inc_config_reload("success");
+                            info!("configuration reloaded successfully");
+                        }
+                        Err(e) => {
+                            streaminfa::observability::metrics::inc_config_reload("failure");
+                            error!(error = %e, "failed to reload configuration on SIGHUP, keeping current config");
+                        }
                     }
                 }
             }
         }
-    }
     }
 }
 
@@ -400,5 +414,41 @@ fn init_tracing(log_level: &str, log_format: &str) {
         _ => {
             tracing_subscriber::fmt().with_env_filter(filter).init();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use streaminfa::core::types::{IngestMode, StreamId};
+
+    #[tokio::test]
+    async fn test_wait_for_state_drain_immediate_when_empty() {
+        let state_manager = StreamStateManager::new();
+        let start = tokio::time::Instant::now();
+
+        wait_for_state_drain(&state_manager, StreamState::Live, 1, "test").await;
+
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_state_drain_times_out_when_state_remains() {
+        let state_manager = StreamStateManager::new();
+        let stream_id = StreamId::new();
+        state_manager
+            .create_stream(stream_id, IngestMode::Live)
+            .await;
+        state_manager
+            .transition(stream_id, StreamState::Live)
+            .await
+            .unwrap();
+
+        let start = tokio::time::Instant::now();
+        wait_for_state_drain(&state_manager, StreamState::Live, 1, "test").await;
+        let elapsed = start.elapsed();
+
+        assert!(elapsed >= std::time::Duration::from_secs(1));
+        assert!(elapsed < std::time::Duration::from_secs(2));
     }
 }

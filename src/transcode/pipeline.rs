@@ -79,7 +79,8 @@ impl TranscodePipeline {
             });
         }
 
-        obs::set_transcode_active_jobs(1.0);
+        obs::inc_transcode_active_jobs();
+        let _active_job_guard = TranscodeActiveJobGuard;
 
         // Register expected rendition count for PROCESSING → READY auto-transition
         // (media-lifecycle.md §3.2 Step 8)
@@ -144,23 +145,27 @@ impl TranscodePipeline {
             // This placeholder will be replaced with actual FFmpeg FFI calls.
 
             let frame_start = std::time::Instant::now();
-            obs::set_transcode_queue_depth(&stream_id.to_string(), segment_tx.capacity() as f64);
+            obs::set_transcode_queue_depth(&stream_id.to_string(), frame_rx.len() as f64);
             match self
                 .process_frame(&frame, &mut accumulators, &segment_tx)
                 .await
             {
                 Ok(()) => {
                     consecutive_decode_errors = 0;
-                    obs::record_transcode_latency("all", frame_start.elapsed().as_secs_f64());
-                    obs::set_transcode_fps(
-                        &stream_id.to_string(),
-                        "all",
-                        1.0 / frame_start.elapsed().as_secs_f64().max(0.001),
-                    );
+                    let frame_latency = frame_start.elapsed().as_secs_f64();
+                    let fps = 1.0 / frame_latency.max(0.001);
+                    for (rendition, _) in accumulators.iter() {
+                        obs::record_transcode_latency(&rendition.id.to_string(), frame_latency);
+                        obs::set_transcode_fps(
+                            &stream_id.to_string(),
+                            &rendition.id.to_string(),
+                            fps,
+                        );
+                    }
                 }
                 Err(e) => {
                     consecutive_decode_errors += 1;
-                    obs::inc_transcode_error(&stream_id.to_string(), &e.to_string());
+                    obs::inc_transcode_error(&stream_id.to_string(), transcode_error_type(&e));
                     if consecutive_decode_errors >= MAX_CONSECUTIVE_DECODE_ERRORS {
                         error!(
                             %stream_id,
@@ -194,7 +199,6 @@ impl TranscodePipeline {
             }
         }
 
-        obs::set_transcode_active_jobs(0.0);
         info!(%stream_id, "live transcode pipeline finished");
         Ok(())
     }
@@ -250,5 +254,21 @@ impl TranscodePipeline {
         }
 
         Ok(())
+    }
+}
+
+fn transcode_error_type(err: &TranscodeError) -> &'static str {
+    match err {
+        TranscodeError::FfmpegInit { .. } => "ffmpeg_init",
+        TranscodeError::Cancelled { .. } => "cancelled",
+        TranscodeError::ConsecutiveDecodeErrors { .. } => "decode_failed",
+    }
+}
+
+struct TranscodeActiveJobGuard;
+
+impl Drop for TranscodeActiveJobGuard {
+    fn drop(&mut self) {
+        obs::dec_transcode_active_jobs();
     }
 }

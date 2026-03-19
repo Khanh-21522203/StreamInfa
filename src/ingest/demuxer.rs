@@ -183,7 +183,22 @@ impl FlvDemuxer {
 
                 // Extract NALUs (length-prefixed, 4-byte big-endian)
                 let nalu_data = &data[5..];
-                let (keyframe, nalu_bytes) = self.extract_nalus(nalu_data)?;
+                let (keyframe, mut nalu_bytes) = self.extract_nalus(nalu_data)?;
+                let is_keyframe = keyframe || frame_type == 1;
+
+                // Ensure keyframes carry SPS/PPS so downstream packagers can derive init metadata.
+                if is_keyframe {
+                    if let (Some(sps), Some(pps)) = (&self.sps, &self.pps) {
+                        let mut prefixed =
+                            Vec::with_capacity(4 + sps.len() + 4 + pps.len() + nalu_bytes.len());
+                        prefixed.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                        prefixed.extend_from_slice(sps);
+                        prefixed.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+                        prefixed.extend_from_slice(pps);
+                        prefixed.extend_from_slice(&nalu_bytes);
+                        nalu_bytes = prefixed;
+                    }
+                }
 
                 // Timestamp normalization: FLV ms → 90kHz
                 let pts_90k = (timestamp_ms as i64 + cts as i64) * 90;
@@ -192,8 +207,6 @@ impl FlvDemuxer {
                 // Normalize to start at 0
                 let pts_90k = self.normalize_pts(pts_90k);
                 let dts_90k = self.normalize_pts(dts_90k);
-
-                let is_keyframe = keyframe || frame_type == 1;
 
                 Ok(Some(DemuxedFrame {
                     stream_id: self.stream_id,
@@ -562,5 +575,32 @@ mod tests {
         ];
 
         assert!(demuxer.extract_nalus(&data).is_err());
+    }
+
+    #[test]
+    fn test_demux_video_keyframe_prepends_sps_pps() {
+        let mut demuxer = FlvDemuxer::new(StreamId::new());
+        demuxer.has_video_seq_header = true;
+        demuxer.video_width = 1920;
+        demuxer.video_height = 1080;
+        demuxer.sps = Some(Bytes::from_static(&[0x67, 0x64, 0x00, 0x1f]));
+        demuxer.pps = Some(Bytes::from_static(&[0x68, 0xeb, 0xef, 0x20]));
+
+        // FLV video tag payload:
+        // - 0x17: keyframe + H.264
+        // - 0x01: AVC NALU packet
+        // - CTS: 0
+        // - NALU: length 1, data 0x65 (IDR)
+        let tag = [
+            0x17, 0x01, 0x00, 0x00, 0x00, // FLV video header
+            0x00, 0x00, 0x00, 0x01, 0x65, // length-prefixed NALU
+        ];
+
+        let frame = demuxer.demux_video(&tag, 0).unwrap().unwrap();
+        let expected_prefix = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x01, 0x68, 0xeb,
+            0xef, 0x20,
+        ];
+        assert!(frame.data.starts_with(&expected_prefix));
     }
 }

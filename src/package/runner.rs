@@ -30,6 +30,7 @@ use super::segment_index::SegmentIndex;
 pub async fn run_packager(
     stream_id: StreamId,
     config: PackagingConfig,
+    is_vod: bool,
     mut segment_rx: mpsc::Receiver<EncodedSegment>,
     storage_tx: mpsc::Sender<StorageWrite>,
     event_tx: mpsc::Sender<PipelineEvent>,
@@ -40,6 +41,11 @@ pub async fn run_packager(
     let mut indexes: HashMap<RenditionId, SegmentIndex> = HashMap::new();
     let mut rendition_infos: Vec<RenditionInfo> = Vec::new();
     let mut init_segments_written: HashMap<RenditionId, bool> = HashMap::new();
+    let segment_window = if is_vod {
+        usize::MAX
+    } else {
+        config.live_window_segments as usize
+    };
 
     loop {
         let segment = tokio::select! {
@@ -62,23 +68,25 @@ pub async fn run_packager(
         let sequence = segment.sequence;
 
         // Ensure we have a segment index for this rendition
-        let index = indexes.entry(rendition.clone()).or_insert_with(|| {
-            SegmentIndex::new(
-                stream_id,
-                rendition.clone(),
-                config.live_window_segments as usize,
-            )
-        });
+        let index = indexes
+            .entry(rendition.clone())
+            .or_insert_with(|| SegmentIndex::new(stream_id, rendition.clone(), segment_window));
 
         // Generate init segment on first segment for each rendition
         if !init_segments_written.contains_key(&rendition) {
+            let (sps, pps) = extract_avc_parameter_sets(&segment.video_data).unwrap_or_else(|| {
+                (
+                    Bytes::from_static(&[0x67, 0x42, 0x00, 0x1e]), // fallback SPS
+                    Bytes::from_static(&[0x68, 0xce, 0x38, 0x80]), // fallback PPS
+                )
+            });
             let init_params = InitSegmentParams {
                 width: segment.width,
                 height: segment.height,
                 video_timescale: 90000,
                 audio_timescale: 48000,
-                sps: Bytes::from_static(&[0x67, 0x42, 0x00, 0x1e]), // placeholder SPS
-                pps: Bytes::from_static(&[0x68, 0xce, 0x38, 0x80]), // placeholder PPS
+                sps,
+                pps,
                 audio_specific_config: segment.audio_data.as_ref().map(|_| {
                     Bytes::from_static(&[0x12, 0x10]) // placeholder AAC config
                 }),
@@ -126,6 +134,13 @@ pub async fn run_packager(
                 frame_rate: segment.frame_rate,
                 has_audio: segment.audio_data.is_some(),
             });
+
+            // Publish/update master playlist as soon as renditions become known.
+            if let Err(e) =
+                write_master_playlist(stream_id, &config, &rendition_infos, &storage_tx).await
+            {
+                warn!(%stream_id, error = %e, "failed to publish master playlist");
+            }
         }
 
         // Generate fMP4 media segment
@@ -186,11 +201,8 @@ pub async fn run_packager(
                 obs::inc_package_segments_written(&stream_id.to_string(), &rendition.to_string());
 
                 // Generate and write updated media playlist
-                let playlist_content = index.generate_playlist(
-                    config.hls_version,
-                    false, // live
-                    segment.is_last,
-                );
+                let playlist_content =
+                    index.generate_playlist(config.hls_version, is_vod, segment.is_last);
                 let playlist_path =
                     manifest::media_playlist_path(&stream_id.to_string(), &rendition.to_string());
                 let playlist_write = StorageWrite {
@@ -255,22 +267,105 @@ pub async fn run_packager(
 
     // Write final multivariant playlist
     if !rendition_infos.is_empty() {
-        let master_content =
-            manifest::generate_multivariant_playlist(&rendition_infos, config.hls_version);
-        let master_path = manifest::master_playlist_path(&stream_id.to_string());
-        let write = StorageWrite {
-            path: master_path,
-            data: Bytes::from(master_content),
-            content_type: "application/vnd.apple.mpegurl".to_string(),
-        };
-        let _ = crate::core::metrics::send_with_backpressure(
-            &storage_tx,
-            write,
-            "packager_storage",
-            crate::core::types::PACKAGER_STORAGE_CHANNEL_CAP,
-        )
-        .await;
+        let _ = write_master_playlist(stream_id, &config, &rendition_infos, &storage_tx).await;
     }
 
     info!(%stream_id, "packager task finished");
+}
+
+async fn write_master_playlist(
+    stream_id: StreamId,
+    config: &PackagingConfig,
+    rendition_infos: &[RenditionInfo],
+    storage_tx: &mpsc::Sender<StorageWrite>,
+) -> Result<(), String> {
+    let master_content =
+        manifest::generate_multivariant_playlist(rendition_infos, config.hls_version);
+    let master_path = manifest::master_playlist_path(&stream_id.to_string());
+    let write = StorageWrite {
+        path: master_path,
+        data: Bytes::from(master_content),
+        content_type: "application/vnd.apple.mpegurl".to_string(),
+    };
+    crate::core::metrics::send_with_backpressure(
+        storage_tx,
+        write,
+        "packager_storage",
+        crate::core::types::PACKAGER_STORAGE_CHANNEL_CAP,
+    )
+    .await
+    .map_err(|_| "storage channel closed while writing master playlist".to_string())
+}
+
+fn extract_avc_parameter_sets(annex_b: &[u8]) -> Option<(Bytes, Bytes)> {
+    let mut sps: Option<Bytes> = None;
+    let mut pps: Option<Bytes> = None;
+    let mut i = 0usize;
+
+    while i + 3 < annex_b.len() {
+        let (start, prefix_len) = if annex_b[i..].starts_with(&[0x00, 0x00, 0x00, 0x01]) {
+            (i + 4, 4)
+        } else if annex_b[i..].starts_with(&[0x00, 0x00, 0x01]) {
+            (i + 3, 3)
+        } else {
+            i += 1;
+            continue;
+        };
+
+        let mut end = start;
+        while end + 3 < annex_b.len()
+            && !annex_b[end..].starts_with(&[0x00, 0x00, 0x00, 0x01])
+            && !annex_b[end..].starts_with(&[0x00, 0x00, 0x01])
+        {
+            end += 1;
+        }
+        if end + 3 >= annex_b.len() {
+            end = annex_b.len();
+        }
+        if end <= start {
+            i += prefix_len;
+            continue;
+        }
+
+        let nalu = &annex_b[start..end];
+        let nal_type = nalu[0] & 0x1F;
+        if nal_type == 7 && sps.is_none() {
+            sps = Some(Bytes::copy_from_slice(nalu));
+        } else if nal_type == 8 && pps.is_none() {
+            pps = Some(Bytes::copy_from_slice(nalu));
+        }
+
+        if sps.is_some() && pps.is_some() {
+            break;
+        }
+        i = end;
+    }
+
+    match (sps, pps) {
+        (Some(sps), Some(pps)) => Some((sps, pps)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_avc_parameter_sets;
+
+    #[test]
+    fn test_extract_avc_parameter_sets_from_annex_b() {
+        // 00 00 00 01 67 ... (SPS), 00 00 00 01 68 ... (PPS), 00 00 00 01 65 ... (IDR)
+        let data = vec![
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x01, 0x68, 0xeb,
+            0xef, 0x20, 0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84,
+        ];
+        let (sps, pps) = extract_avc_parameter_sets(&data).expect("expected SPS/PPS");
+        assert_eq!(&sps[..], &[0x67, 0x64, 0x00, 0x1f]);
+        assert_eq!(&pps[..], &[0x68, 0xeb, 0xef, 0x20]);
+    }
+
+    #[test]
+    fn test_extract_avc_parameter_sets_missing_pps() {
+        let data = vec![0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f];
+        assert!(extract_avc_parameter_sets(&data).is_none());
+    }
 }

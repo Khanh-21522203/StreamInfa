@@ -25,19 +25,19 @@ pub fn record_channel_metrics(label: &str, current_len: usize, capacity: usize) 
     } else {
         0.0
     };
-    metrics::gauge!("streaminfa_channel_utilization", "channel" => label.to_string())
+    metrics::gauge!("streaminfa_channel_utilization", "channel_name" => label.to_string())
         .set(utilization);
 }
 
 /// Record the time spent waiting on a channel send (performance-and-backpressure.md §4.4).
 pub fn record_channel_send_wait(channel_name: &str, wait_seconds: f64) {
-    metrics::histogram!("streaminfa_channel_send_wait_seconds", "channel" => channel_name.to_string())
+    metrics::histogram!("streaminfa_channel_send_wait_seconds", "channel_name" => channel_name.to_string())
         .record(wait_seconds);
 }
 
 /// Increment backpressure event counter when a send blocks > 100ms.
 pub fn inc_backpressure_event(channel_name: &str) {
-    metrics::counter!("streaminfa_backpressure_events_total", "channel" => channel_name.to_string())
+    metrics::counter!("streaminfa_backpressure_events_total", "channel_name" => channel_name.to_string())
         .increment(1);
 }
 

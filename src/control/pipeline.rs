@@ -56,9 +56,9 @@ pub fn create_pipeline(
 ) -> Pipeline {
     // Register backpressure metrics (from performance-and-backpressure.md §4)
     metrics::describe_backpressure_metrics();
-    metrics::record_channel_metrics("ingest_transcode", INGEST_TRANSCODE_CHANNEL_CAP, 0);
-    metrics::record_channel_metrics("transcode_packager", TRANSCODE_PACKAGER_CHANNEL_CAP, 0);
-    metrics::record_channel_metrics("packager_storage", PACKAGER_STORAGE_CHANNEL_CAP, 0);
+    metrics::record_channel_metrics("ingest_transcode", 0, INGEST_TRANSCODE_CHANNEL_CAP);
+    metrics::record_channel_metrics("transcode_packager", 0, TRANSCODE_PACKAGER_CHANNEL_CAP);
+    metrics::record_channel_metrics("packager_storage", 0, PACKAGER_STORAGE_CHANNEL_CAP);
 
     let (ingest_tx, ingest_rx) = mpsc::channel(INGEST_TRANSCODE_CHANNEL_CAP);
     let (transcode_tx, transcode_rx) = mpsc::channel(TRANSCODE_PACKAGER_CHANNEL_CAP);

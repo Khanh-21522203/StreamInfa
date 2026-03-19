@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use crate::core::types::{StorageWrite, StreamId};
 use crate::observability::metrics as obs;
 
-use super::memory::InMemoryMediaStore;
+use super::AppMediaStore;
 use super::MediaStore;
 
 /// Maximum number of retry attempts per storage write (storage-and-delivery.md §4.3).
@@ -26,7 +26,7 @@ const RETRY_BASE_DELAY_MS: u64 = 100;
 /// to the storage backend. It runs until the channel is closed or cancelled.
 pub async fn run_storage_writer(
     stream_id: StreamId,
-    store: Arc<InMemoryMediaStore>,
+    store: Arc<AppMediaStore>,
     mut write_rx: mpsc::Receiver<StorageWrite>,
     cancel: CancellationToken,
 ) {

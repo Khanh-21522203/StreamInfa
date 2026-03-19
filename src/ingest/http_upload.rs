@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
+use tokio::io::AsyncReadExt;
 use tracing::{info, warn};
 
 use crate::control::state::{StreamState, StreamStateManager};
@@ -113,7 +114,7 @@ impl HttpUploadHandler {
         }
 
         // Create stream record
-        let _media_info = probe.to_media_info(stream_id);
+        let media_info = probe.to_media_info(stream_id);
         let mut _entry = self
             .state_manager
             .create_stream(stream_id, IngestMode::Vod)
@@ -127,6 +128,9 @@ impl HttpUploadHandler {
             .map_err(|e| IngestError::ValidationFailed {
                 reason: e.to_string(),
             })?;
+        self.state_manager
+            .set_media_info(stream_id, media_info)
+            .await;
 
         info!(
             %stream_id,
@@ -172,23 +176,22 @@ impl HttpUploadHandler {
             });
         }
 
-        // Validate probe size against security limit (security.md §4.4)
-        if metadata.len() as usize > security::FFMPEG_PROBE_MAX_SIZE {
-            return Err(IngestError::CorruptFile {
-                reason: format!(
-                    "file size {} exceeds probe limit {}",
-                    metadata.len(),
-                    security::FFMPEG_PROBE_MAX_SIZE
-                ),
-            });
-        }
-
-        // Read first 12 bytes to detect container format from magic bytes
-        let header = tokio::fs::read(file_path)
+        // Read only the initial probe bytes needed for container sniffing.
+        // This avoids loading large uploads into memory.
+        let mut file =
+            tokio::fs::File::open(file_path)
+                .await
+                .map_err(|e| IngestError::CorruptFile {
+                    reason: format!("cannot open file for probe: {}", e),
+                })?;
+        let mut header = [0u8; 12];
+        let n = file
+            .read(&mut header)
             .await
             .map_err(|e| IngestError::CorruptFile {
                 reason: format!("cannot read file header: {}", e),
             })?;
+        let header = &header[..n];
 
         let container = if header.len() >= 12 && &header[4..8] == b"ftyp" {
             Container::Mp4
@@ -206,6 +209,8 @@ impl HttpUploadHandler {
         //   ... extract streams, codecs, duration, resolution ...
         warn!(
             path = %file_path.display(),
+            probe_limit_bytes = security::FFMPEG_PROBE_MAX_SIZE,
+            file_size = metadata.len(),
             "using placeholder probe results (FFmpeg FFI not yet integrated)"
         );
 
@@ -268,5 +273,82 @@ pub fn build_error_response(err: &IngestError, stream_id: Option<StreamId>) -> U
         error: error_code.to_string(),
         message: err.to_string(),
         stream_id: stream_id.map(|id| id.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::{AuthConfig, IngestConfig};
+    use crate::core::types::Container;
+    use std::sync::Arc;
+    use tokio::io::AsyncWriteExt;
+
+    fn test_ingest_config() -> IngestConfig {
+        IngestConfig {
+            max_bitrate_kbps: 20000,
+            max_upload_size_bytes: 10_737_418_240,
+            allowed_codecs: vec!["h264".to_string()],
+            allowed_audio_codecs: vec!["aac".to_string(), "mp3".to_string()],
+            max_duration_secs: 21600.0,
+            upload_timeout_secs: 60,
+            max_concurrent_rtmp_connections: 50,
+            max_concurrent_live_streams: 10,
+            max_concurrent_uploads: 10,
+            max_pending_connections: 100,
+        }
+    }
+
+    fn test_upload_handler() -> HttpUploadHandler {
+        let auth = Arc::new(AuthProvider::new(&AuthConfig {
+            ingest_stream_keys: Vec::new(),
+            admin_bearer_tokens: Vec::new(),
+        }));
+        let state_manager = Arc::new(StreamStateManager::new());
+        HttpUploadHandler::new(test_ingest_config(), auth, state_manager)
+    }
+
+    #[tokio::test]
+    async fn test_probe_file_allows_large_file_and_detects_mp4() {
+        let handler = test_upload_handler();
+        let path =
+            std::env::temp_dir().join(format!("streaminfa-probe-large-{}.tmp", StreamId::new()));
+
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        // Minimal MP4 signature: bytes 4..8 = "ftyp"
+        file.write_all(&[
+            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm',
+        ])
+        .await
+        .unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        // Simulate a large upload without allocating the full file contents.
+        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        f.set_len((security::FFMPEG_PROBE_MAX_SIZE as u64) + 1)
+            .unwrap();
+
+        let probe = handler.probe_file(&path).await.unwrap();
+        assert_eq!(probe.container, Container::Mp4);
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_probe_file_rejects_unknown_magic() {
+        let handler = test_upload_handler();
+        let path =
+            std::env::temp_dir().join(format!("streaminfa-probe-unknown-{}.tmp", StreamId::new()));
+
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        file.write_all(b"not-a-media-header").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        let err = handler.probe_file(&path).await.unwrap_err();
+        assert!(matches!(err, IngestError::UnsupportedFormat { .. }));
+
+        let _ = tokio::fs::remove_file(&path).await;
     }
 }

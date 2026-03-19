@@ -9,14 +9,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::control::events::PipelineEvent;
-use crate::control::state::StreamStateManager;
+use crate::control::state::{StreamState, StreamStateManager};
 use crate::core::auth::AuthProvider;
 use crate::core::config::{AppConfig, IngestConfig};
 use crate::core::error::IngestError;
 use crate::core::security;
 use crate::core::types::{DemuxedFrame, MediaInfo, StreamId, VideoCodec};
 use crate::observability::metrics as obs;
-use crate::storage::memory::InMemoryMediaStore;
+use crate::storage::AppMediaStore;
 
 use super::demuxer::FlvDemuxer;
 
@@ -98,7 +98,7 @@ pub struct RtmpServer {
     app_config: AppConfig,
     auth: Arc<AuthProvider>,
     state_manager: Arc<StreamStateManager>,
-    store: Arc<InMemoryMediaStore>,
+    store: Arc<AppMediaStore>,
     cancel: CancellationToken,
     event_tx: mpsc::Sender<PipelineEvent>,
 }
@@ -109,7 +109,7 @@ impl RtmpServer {
         app_config: AppConfig,
         auth: Arc<AuthProvider>,
         state_manager: Arc<StreamStateManager>,
-        store: Arc<InMemoryMediaStore>,
+        store: Arc<AppMediaStore>,
         cancel: CancellationToken,
         event_tx: mpsc::Sender<PipelineEvent>,
     ) -> Self {
@@ -184,7 +184,14 @@ impl RtmpServer {
 
                     tokio::spawn(async move {
                         if let Err(e) = conn.handle(socket, peer_addr).await {
-                            obs::inc_ingest_error("rtmp", &e.to_string());
+                            obs::inc_ingest_error("rtmp", ingest_error_type(&e));
+                            if let IngestError::AuthFailed { reason } = &e {
+                                obs::inc_auth_failure(
+                                    "rtmp",
+                                    "publish",
+                                    auth_failure_reason(reason),
+                                );
+                            }
                             warn!(%peer_addr, error = %e, "RTMP connection error");
                         }
                         drop(permit);
@@ -206,7 +213,7 @@ struct RtmpConnection {
     app_config: AppConfig,
     auth: Arc<AuthProvider>,
     state_manager: Arc<StreamStateManager>,
-    store: Arc<InMemoryMediaStore>,
+    store: Arc<AppMediaStore>,
     cancel: CancellationToken,
     active_streams: Arc<tokio::sync::Semaphore>,
     event_tx: mpsc::Sender<PipelineEvent>,
@@ -260,11 +267,36 @@ impl RtmpConnection {
             }
         };
 
-        // Create stream record
-        let stream_id = StreamId::new();
-        self.state_manager
-            .create_stream(stream_id, crate::core::types::IngestMode::Live)
-            .await;
+        // Resolve stream identity from stream key when key is created by control plane.
+        // Fallback: unbound/static keys create a new stream record (open-mode compatibility).
+        let stream_id =
+            if let Some(mapped_stream_id) = self.auth.resolve_stream_id_for_key(&stream_key) {
+                match self.state_manager.get_stream(mapped_stream_id).await {
+                    Some(entry) => {
+                        if entry.state != StreamState::Pending {
+                            return Err(IngestError::AuthFailed {
+                                reason: format!(
+                                    "stream key is not attachable in current state: {}",
+                                    entry.state
+                                ),
+                            });
+                        }
+                        mapped_stream_id
+                    }
+                    None => {
+                        self.state_manager
+                            .create_stream(mapped_stream_id, crate::core::types::IngestMode::Live)
+                            .await;
+                        mapped_stream_id
+                    }
+                }
+            } else {
+                let new_stream_id = StreamId::new();
+                self.state_manager
+                    .create_stream(new_stream_id, crate::core::types::IngestMode::Live)
+                    .await;
+                new_stream_id
+            };
         // Validate RTMP codecs after sequence header (from ingest.md §3.4)
         // In a full implementation, this would be called after receiving the AVC sequence header.
         // For now, we validate the default expected codecs.
@@ -356,6 +388,7 @@ impl RtmpConnection {
             crate::package::runner::run_packager(
                 stream_id,
                 packaging_config,
+                false,
                 packager_segment_rx,
                 packager_storage_tx,
                 packager_event_tx,
@@ -381,7 +414,12 @@ impl RtmpConnection {
         // Use the pipeline's ingest_tx for sending frames
         let frame_tx = pipeline.ingest_tx;
 
-        info!(%stream_id, %peer_addr, %stream_key, "live stream started");
+        info!(
+            %stream_id,
+            %peer_addr,
+            stream_key = %crate::core::redact::redact_stream_key(&stream_key),
+            "live stream started"
+        );
 
         // Phase 3-5: Demux loop
         let demux_result = self
@@ -587,7 +625,7 @@ impl RtmpConnection {
                             } else {
                                 "video"
                             };
-                            obs::inc_ingest_frames("rtmp", track_label);
+                            obs::inc_ingest_frames(&stream_id.to_string(), track_label);
                             obs::add_ingest_bytes(
                                 "rtmp",
                                 &stream_id.to_string(),
@@ -877,6 +915,34 @@ impl RtmpConnection {
         data.push(0x00);
         data.extend_from_slice(&1.0f64.to_be_bytes());
         data
+    }
+}
+
+fn ingest_error_type(err: &IngestError) -> &'static str {
+    match err {
+        IngestError::AuthFailed { .. } => "auth_failed",
+        IngestError::HandshakeTimeout { .. } => "handshake_timeout",
+        IngestError::InvalidRtmpVersion { .. } => "invalid_rtmp_version",
+        IngestError::MalformedAmf { .. } => "malformed_amf",
+        IngestError::MissingSequenceHeader { .. } => "missing_sequence_header",
+        IngestError::InvalidCodec { .. } => "invalid_codec",
+        IngestError::UnsupportedCodec { .. } => "unsupported_codec",
+        IngestError::ValidationFailed { .. } => "validation_failed",
+        IngestError::ConnectionReset { .. } => "connection_reset",
+        IngestError::Io(_) => "io_error",
+        _ => "ingest_error",
+    }
+}
+
+fn auth_failure_reason(reason: &str) -> &'static str {
+    if reason.contains("blocked") {
+        "blocked_ip"
+    } else if reason.contains("invalid stream key") {
+        "invalid_stream_key"
+    } else if reason.contains("active stream limit") {
+        "active_stream_limit"
+    } else {
+        "auth_failed"
     }
 }
 

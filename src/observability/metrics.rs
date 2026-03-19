@@ -143,6 +143,10 @@ pub fn describe_all_metrics() {
         "streaminfa_shutdown_in_progress",
         "1 if graceful shutdown is in progress, 0 otherwise"
     );
+    describe_counter!(
+        "streaminfa_auth_failures_total",
+        "Authentication failures by protocol, endpoint, and reason"
+    );
 
     // -- Backpressure metrics (§2.2) --
     // These are also described in core::metrics, but we re-describe here for completeness
@@ -207,6 +211,14 @@ pub fn record_upload_size(bytes: f64) {
 
 pub fn set_transcode_active_jobs(count: f64) {
     gauge!("streaminfa_transcode_active_jobs").set(count);
+}
+
+pub fn inc_transcode_active_jobs() {
+    gauge!("streaminfa_transcode_active_jobs").increment(1.0);
+}
+
+pub fn dec_transcode_active_jobs() {
+    gauge!("streaminfa_transcode_active_jobs").decrement(1.0);
 }
 
 pub fn inc_transcode_segments(stream_id: &str, rendition: &str) {
@@ -322,6 +334,14 @@ pub fn set_delivery_active_connections(count: f64) {
     gauge!("streaminfa_delivery_active_connections").set(count);
 }
 
+pub fn inc_delivery_active_connections() {
+    gauge!("streaminfa_delivery_active_connections").increment(1.0);
+}
+
+pub fn dec_delivery_active_connections() {
+    gauge!("streaminfa_delivery_active_connections").decrement(1.0);
+}
+
 // -- System --
 
 pub fn set_uptime_seconds(seconds: f64) {
@@ -342,6 +362,35 @@ pub fn inc_config_reload(result: &str) {
 
 pub fn set_shutdown_in_progress(in_progress: bool) {
     gauge!("streaminfa_shutdown_in_progress").set(if in_progress { 1.0 } else { 0.0 });
+}
+
+pub fn inc_auth_failure(protocol: &str, endpoint: &str, reason: &str) {
+    counter!(
+        "streaminfa_auth_failures_total",
+        "protocol" => protocol.to_string(),
+        "endpoint" => endpoint.to_string(),
+        "reason" => reason.to_string()
+    )
+    .increment(1);
+}
+
+/// Best-effort stream metric cleanup for per-stream gauges on terminal states.
+///
+/// Counter/histogram series cannot be deleted through the generic `metrics` facade,
+/// so we normalize per-stream gauges back to zero when streams complete/delete.
+pub fn clear_stream_metrics(stream_id: &str) {
+    gauge!("streaminfa_ingest_bitrate_bps", "stream_id" => stream_id.to_string()).set(0.0);
+    gauge!("streaminfa_transcode_queue_depth", "stream_id" => stream_id.to_string()).set(0.0);
+    gauge!("streaminfa_vod_progress_percent", "stream_id" => stream_id.to_string()).set(0.0);
+    gauge!("streaminfa_ingest_channel_utilization", "stream_id" => stream_id.to_string()).set(0.0);
+    for rendition in ["high", "medium", "low", "source"] {
+        gauge!(
+            "streaminfa_transcode_fps",
+            "stream_id" => stream_id.to_string(),
+            "rendition" => rendition.to_string()
+        )
+        .set(0.0);
+    }
 }
 
 // ---------------------------------------------------------------------------

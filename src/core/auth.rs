@@ -9,6 +9,7 @@ use tracing::warn;
 use super::config::AuthConfig;
 use super::error::IngestError;
 use super::security;
+use crate::core::types::StreamId;
 
 /// Bcrypt cost factor for hashing stream keys and admin tokens (security.md §2.1).
 const BCRYPT_COST: u32 = 10;
@@ -27,13 +28,17 @@ const ALPHANUMERIC: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 #[derive(Debug)]
 pub struct AuthProvider {
     /// Valid RTMP stream keys stored as bcrypt hashes.
-    ingest_key_hashes: Mutex<Vec<String>>,
+    ingest_keys: Mutex<Vec<IngestKeyRecord>>,
     /// Valid admin bearer tokens stored as bcrypt hashes.
     admin_token_hashes: Mutex<Vec<String>>,
-    /// Whether open mode is active (no tokens configured).
-    admin_tokens_open_mode: bool,
     /// IP-based brute-force tracker (from security.md §2.1).
     brute_force_tracker: Mutex<HashMap<IpAddr, BruteForceEntry>>,
+}
+
+#[derive(Debug, Clone)]
+struct IngestKeyRecord {
+    hash: String,
+    stream_id: Option<StreamId>,
 }
 
 /// Tracks failed auth attempts from a single IP.
@@ -49,12 +54,18 @@ struct BruteForceEntry {
 
 impl AuthProvider {
     pub fn new(config: &AuthConfig) -> Self {
-        let open_mode = config.admin_bearer_tokens.is_empty();
         // Hash all configured keys/tokens at startup (security.md §2.1, §2.2)
-        let key_hashes: Vec<String> = config
+        let key_hashes: Vec<IngestKeyRecord> = config
             .ingest_stream_keys
             .iter()
-            .filter_map(|k| bcrypt::hash(k, BCRYPT_COST).ok())
+            .filter_map(|k| {
+                bcrypt::hash(k, BCRYPT_COST)
+                    .ok()
+                    .map(|hash| IngestKeyRecord {
+                        hash,
+                        stream_id: None,
+                    })
+            })
             .collect();
         let token_hashes: Vec<String> = config
             .admin_bearer_tokens
@@ -62,9 +73,8 @@ impl AuthProvider {
             .filter_map(|t| bcrypt::hash(t, BCRYPT_COST).ok())
             .collect();
         Self {
-            ingest_key_hashes: Mutex::new(key_hashes),
+            ingest_keys: Mutex::new(key_hashes),
             admin_token_hashes: Mutex::new(token_hashes),
-            admin_tokens_open_mode: open_mode,
             brute_force_tracker: Mutex::new(HashMap::new()),
         }
     }
@@ -73,6 +83,14 @@ impl AuthProvider {
     /// Returns (plaintext_key, bcrypt_hash). The plaintext is returned to the
     /// caller once; only the hash is stored (security.md §2.1).
     pub fn generate_stream_key(&self) -> (String, String) {
+        self.generate_stream_key_for_stream(Option::<StreamId>::None)
+    }
+
+    /// Generate a new stream key bound to a specific stream ID.
+    pub fn generate_stream_key_for_stream(
+        &self,
+        stream_id: impl Into<Option<StreamId>>,
+    ) -> (String, String) {
         let plaintext = generate_random_token(
             security::STREAM_KEY_PREFIX,
             security::STREAM_KEY_RANDOM_LENGTH,
@@ -80,11 +98,11 @@ impl AuthProvider {
         let hash = bcrypt::hash(&plaintext, BCRYPT_COST)
             .expect("bcrypt hash should not fail for valid input");
         {
-            let mut hashes = self
-                .ingest_key_hashes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            hashes.push(hash.clone());
+            let mut keys = self.ingest_keys.lock().unwrap_or_else(|e| e.into_inner());
+            keys.push(IngestKeyRecord {
+                hash: hash.clone(),
+                stream_id: stream_id.into(),
+            });
         }
         (plaintext, hash)
     }
@@ -109,13 +127,21 @@ impl AuthProvider {
     /// and returns a new (plaintext, hash) pair (security.md §2.1).
     pub fn rotate_stream_key(&self, old_hash: &str) -> (String, String) {
         {
-            let mut hashes = self
-                .ingest_key_hashes
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            hashes.retain(|h| h != old_hash);
+            let mut keys = self.ingest_keys.lock().unwrap_or_else(|e| e.into_inner());
+            keys.retain(|k| k.hash != old_hash);
         }
         self.generate_stream_key()
+    }
+
+    /// Rotate the stream key set for a specific stream id.
+    ///
+    /// Removes previously bound keys for that stream and returns one fresh key.
+    pub fn rotate_stream_key_for_stream(&self, stream_id: StreamId) -> (String, String) {
+        {
+            let mut keys = self.ingest_keys.lock().unwrap_or_else(|e| e.into_inner());
+            keys.retain(|k| k.stream_id != Some(stream_id));
+        }
+        self.generate_stream_key_for_stream(stream_id)
     }
 
     /// Validate an RTMP stream key against stored bcrypt hashes.
@@ -123,17 +149,14 @@ impl AuthProvider {
     /// If no keys are configured, all keys are accepted (open mode).
     /// Uses bcrypt_verify which is inherently constant-time (security.md §2.1).
     pub fn validate_stream_key(&self, stream_key: &str) -> Result<(), IngestError> {
-        let hashes = self
-            .ingest_key_hashes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if hashes.is_empty() {
+        let keys = self.ingest_keys.lock().unwrap_or_else(|e| e.into_inner());
+        if keys.is_empty() {
             return Ok(());
         }
 
-        if hashes
+        if keys
             .iter()
-            .any(|h| bcrypt::verify(stream_key, h).unwrap_or(false))
+            .any(|k| bcrypt::verify(stream_key, &k.hash).unwrap_or(false))
         {
             Ok(())
         } else {
@@ -255,6 +278,9 @@ impl AuthProvider {
     /// - Not in valid set → 403
     /// - Valid → proceed
     pub fn check_bearer_token(&self, token: Option<&str>) -> TokenStatus {
+        if self.is_open_mode() {
+            return TokenStatus::Valid;
+        }
         match token {
             None => TokenStatus::Missing,
             Some(t) => {
@@ -270,15 +296,35 @@ impl AuthProvider {
     /// Update stream keys at runtime (supports key rotation without restart).
     /// Accepts plaintext keys and hashes them before storing.
     pub fn update_stream_keys(&self, keys: Vec<String>) {
-        let hashes: Vec<String> = keys
+        let records: Vec<IngestKeyRecord> = keys
             .iter()
-            .filter_map(|k| bcrypt::hash(k, BCRYPT_COST).ok())
+            .filter_map(|k| {
+                bcrypt::hash(k, BCRYPT_COST)
+                    .ok()
+                    .map(|hash| IngestKeyRecord {
+                        hash,
+                        stream_id: None,
+                    })
+            })
             .collect();
-        let mut current = self
-            .ingest_key_hashes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *current = hashes;
+        let mut current = self.ingest_keys.lock().unwrap_or_else(|e| e.into_inner());
+        *current = records;
+    }
+
+    /// Resolve stream id associated with a stream key.
+    ///
+    /// Returns `Some(stream_id)` only for keys generated by the control API
+    /// that were explicitly bound to a stream. Returns `None` for keys loaded
+    /// from static config or unknown keys.
+    pub fn resolve_stream_id_for_key(&self, stream_key: &str) -> Option<StreamId> {
+        let keys = self.ingest_keys.lock().unwrap_or_else(|e| e.into_inner());
+        keys.iter().find_map(|k| {
+            if bcrypt::verify(stream_key, &k.hash).unwrap_or(false) {
+                k.stream_id
+            } else {
+                None
+            }
+        })
     }
 
     /// Update admin bearer tokens at runtime.
@@ -297,7 +343,10 @@ impl AuthProvider {
 
     /// Check if running in open mode (no admin tokens configured).
     pub fn is_open_mode(&self) -> bool {
-        self.admin_tokens_open_mode
+        self.admin_token_hashes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// Clean up expired brute-force tracker entries.
@@ -340,4 +389,64 @@ fn generate_random_token(prefix: &str, random_length: usize) -> String {
         })
         .collect();
     format!("{}{}", prefix, random_part)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_auth_config() -> AuthConfig {
+        AuthConfig {
+            ingest_stream_keys: Vec::new(),
+            admin_bearer_tokens: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_stream_id_for_bound_key() {
+        let provider = AuthProvider::new(&empty_auth_config());
+        let stream_id = StreamId::new();
+        let (key, _hash) = provider.generate_stream_key_for_stream(stream_id);
+
+        let resolved = provider.resolve_stream_id_for_key(&key);
+        assert_eq!(resolved, Some(stream_id));
+    }
+
+    #[test]
+    fn test_resolve_stream_id_for_unbound_key() {
+        let provider = AuthProvider::new(&empty_auth_config());
+        let (key, _hash) = provider.generate_stream_key();
+
+        let resolved = provider.resolve_stream_id_for_key(&key);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_rotate_stream_key_for_stream_invalidates_old_keys() {
+        let provider = AuthProvider::new(&empty_auth_config());
+        let stream_id = StreamId::new();
+        let (old_key, _old_hash) = provider.generate_stream_key_for_stream(stream_id);
+
+        let (new_key, _new_hash) = provider.rotate_stream_key_for_stream(stream_id);
+
+        assert!(provider.validate_stream_key(&old_key).is_err());
+        assert_eq!(provider.resolve_stream_id_for_key(&old_key), None);
+        assert!(provider.validate_stream_key(&new_key).is_ok());
+        assert_eq!(
+            provider.resolve_stream_id_for_key(&new_key),
+            Some(stream_id)
+        );
+    }
+
+    #[test]
+    fn test_open_mode_tracks_runtime_token_updates() {
+        let provider = AuthProvider::new(&empty_auth_config());
+        assert!(provider.is_open_mode());
+
+        provider.update_admin_tokens(vec!["at_runtime_token".to_string()]);
+        assert!(!provider.is_open_mode());
+
+        provider.update_admin_tokens(Vec::new());
+        assert!(provider.is_open_mode());
+    }
 }

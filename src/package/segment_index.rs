@@ -54,10 +54,11 @@ pub struct SegmentIndex {
 
 impl SegmentIndex {
     pub fn new(stream_id: StreamId, rendition: RenditionId, live_window_segments: usize) -> Self {
+        let initial_capacity = live_window_segments.saturating_add(1).min(1024);
         Self {
             _stream_id: stream_id,
             _rendition: rendition,
-            segments: VecDeque::with_capacity(live_window_segments + 1),
+            segments: VecDeque::with_capacity(initial_capacity),
             live_window_segments,
             next_sequence: 0,
             total_segments_produced: 0,
@@ -92,7 +93,9 @@ impl SegmentIndex {
         }
 
         // Evict oldest if window exceeded
-        if self.segments.len() > self.live_window_segments {
+        if self.live_window_segments != usize::MAX
+            && self.segments.len() > self.live_window_segments
+        {
             self.segments.pop_front()
         } else {
             None
@@ -246,5 +249,16 @@ mod tests {
         assert_eq!(index.len(), 2); // window size
         assert_eq!(index.total_segments_produced(), 10); // total ever produced
         assert_eq!(index.next_sequence(), 10);
+    }
+
+    #[test]
+    fn test_unbounded_window_does_not_evict() {
+        let mut index = SegmentIndex::new(StreamId::new(), RenditionId::Source, usize::MAX);
+        for i in 0..10 {
+            let evicted = index.add_segment(6.0, format!("{:06}.m4s", i), 100);
+            assert!(evicted.is_none());
+        }
+        assert_eq!(index.len(), 10);
+        assert_eq!(index.media_sequence(), 0);
     }
 }

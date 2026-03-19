@@ -144,6 +144,13 @@ impl StreamStateManager {
         let updated = entry_ref.clone();
         drop(entry_ref);
 
+        if matches!(
+            new_state,
+            StreamState::Ready | StreamState::Error | StreamState::Deleted
+        ) {
+            obs::clear_stream_metrics(&stream_id.to_string());
+        }
+
         // Update stream count gauges
         self.update_stream_gauges();
 
@@ -191,6 +198,7 @@ impl StreamStateManager {
         entry_ref.error_message = Some(error_message);
         let updated = entry_ref.clone();
         drop(entry_ref);
+        obs::clear_stream_metrics(&stream_id.to_string());
         self.update_stream_gauges();
         Ok(updated)
     }
@@ -295,6 +303,7 @@ impl StreamStateManager {
     pub async fn remove_stream(&self, stream_id: StreamId) -> bool {
         let removed = self.streams.remove(&stream_id).is_some();
         if removed {
+            obs::clear_stream_metrics(&stream_id.to_string());
             self.update_stream_gauges();
         }
         removed

@@ -35,7 +35,7 @@ pub const MAX_METADATA_ENTRIES: usize = 50;
 pub const MAX_LIST_LIMIT: usize = 100;
 
 /// Default `limit` query parameter value for list endpoints.
-pub const DEFAULT_LIST_LIMIT: usize = 10;
+pub const DEFAULT_LIST_LIMIT: usize = 50;
 
 // -- Brute-force protection (from security.md §2.1) --
 
