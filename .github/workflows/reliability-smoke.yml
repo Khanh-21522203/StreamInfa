@@ -1,0 +1,33 @@
+name: reliability-smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+env:
+  STREAMINFA_ADMIN_TOKEN: at_dev_token_for_local_testing_only
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure scripts are executable
+        run: chmod +x scripts/*.sh
+
+      - name: Start StreamInfa compose stack
+        run: docker compose -f docker/docker-compose.yml up -d --build streaminfa
+
+      - name: Post-deploy verification
+        run: ./scripts/post_deploy_verify.sh http://localhost:8080 "$STREAMINFA_ADMIN_TOKEN"
+
+      - name: Collect compose logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.yml logs --tail=300
+
+      - name: Shutdown stack
+        if: always()
+        run: docker compose -f docker/docker-compose.yml down -v
