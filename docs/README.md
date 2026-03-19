@@ -54,6 +54,7 @@ StreamInfa is **not** a video player, a frontend application, a CDN, or a recomm
 | Document | Path | Description |
 |----------|------|-------------|
 | **Testing Strategy** | `docs/testing/testing-strategy.md` | Unit, integration, e2e testing; failure injection |
+| **Benchmarking** | `docs/testing/benchmarking.md` | Load-testing scripts and latency/throughput benchmark workflow |
 | **Observability** | `docs/observability/observability.md` | Metrics, logging, tracing, SLIs/SLOs |
 | **Docker** | `docs/devops/docker.md` | Dockerfile, docker-compose, local dev workflow |
 | **Deployment** | `docs/devops/deployment.md` | CI/CD, environment config, rollback strategy |

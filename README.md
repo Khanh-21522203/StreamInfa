@@ -412,6 +412,18 @@ cargo test --test integration_control_plane -- --nocapture
 cargo test --test e2e_playback_flow -- --nocapture
 ```
 
+## Benchmarking
+
+```bash
+# Control-plane benchmark (list + create/delete)
+ADMIN_TOKEN=<admin_token> ./scripts/benchmark.sh control
+
+# Delivery benchmark (requires a stream with available artifacts)
+DELIVERY_STREAM_ID=<uuidv7> ./scripts/benchmark.sh delivery
+```
+
+Detailed guide: `docs/testing/benchmarking.md`
+
 ## Quality and Ops Workflows
 
 1. CI gates: `.github/workflows/ci.yml`
