@@ -424,6 +424,32 @@ DELIVERY_STREAM_ID=<uuidv7> ./scripts/benchmark.sh delivery
 
 Detailed guide: `docs/testing/benchmarking.md`
 
+### Benchmark Snapshot (2026-03-19)
+
+Environment:
+1. StreamInfa `release` build (`cargo build --release`)
+2. Benchmark runner: Docker `grafana/k6:0.50.0`
+3. Parameters: `DURATION=20s`, `VUS=10`, `CONTROL_CREATE_VUS=2`
+4. Target: `BASE_URL=http://host.docker.internal:8080`
+
+Results:
+
+| Metric | Value |
+|---|---|
+| `http_reqs` | `226` total (`10.55 req/s`) |
+| `http_req_failed` | `0.00%` |
+| `http_req_duration` avg | `1.00s` |
+| `http_req_duration` p90 | `1.40s` |
+| `http_req_duration` p95 | `2.78s` |
+| `http_req_duration` max | `9.53s` |
+| `control_create_delete_duration_ms` avg | `2733.4ms` |
+| `control_create_delete_duration_ms` p95 | `6235.4ms` |
+| `iterations` | `211` total (`9.85 iter/s`) |
+
+Notes:
+1. This snapshot is for local single-node benchmarking only; treat it as a baseline, not an SLO.
+2. Current k6 thresholds in `scripts/k6/control-plane.js` are stricter than the above values, so the run reports threshold-crossed even with `0%` request failures.
+
 ## Quality and Ops Workflows
 
 1. CI gates: `.github/workflows/ci.yml`
