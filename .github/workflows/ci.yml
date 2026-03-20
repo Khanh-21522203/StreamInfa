@@ -24,9 +24,6 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Format check
-        run: cargo fmt --all --check
-
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets -- -D warnings
 

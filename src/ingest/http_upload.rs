@@ -302,7 +302,12 @@ fn probe_with_ffmpeg(file_path: &std::path::Path) -> Result<ProbeResult, IngestE
                 .as_ref()
                 .map(|a| (a.rate(), a.channels()))
                 .unwrap_or((48000, 2));
-            (Some(AudioCodec::Aac), Some(sr), Some(ch as u8), Some(128u32))
+            (
+                Some(AudioCodec::Aac),
+                Some(sr),
+                Some(ch as u8),
+                Some(128u32),
+            )
         } else {
             (None, None, None, None)
         };
@@ -342,11 +347,12 @@ async fn probe_placeholder(file_path: &std::path::Path) -> Result<ProbeResult, I
         });
     }
 
-    let mut file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(|e| IngestError::CorruptFile {
-            reason: format!("cannot open file for probe: {e}"),
-        })?;
+    let mut file =
+        tokio::fs::File::open(file_path)
+            .await
+            .map_err(|e| IngestError::CorruptFile {
+                reason: format!("cannot open file for probe: {e}"),
+            })?;
     let mut header = [0u8; 12];
     let n = file
         .read(&mut header)

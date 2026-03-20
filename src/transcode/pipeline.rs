@@ -415,7 +415,12 @@ impl TranscodePipeline {
         // Capture audio parameters from the track info so the packager can
         // derive the correct AudioSpecificConfig in the init segment.
         if is_audio {
-            if let crate::core::types::Track::Audio { sample_rate, channels, .. } = frame.track {
+            if let crate::core::types::Track::Audio {
+                sample_rate,
+                channels,
+                ..
+            } = frame.track
+            {
                 for (_, acc) in accumulators.iter_mut() {
                     acc.set_audio_params(sample_rate, channels);
                 }

@@ -21,7 +21,11 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, byte_pos: 0, bit_pos: 0 }
+        Self {
+            data,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
     }
 
     fn read_bit(&mut self) -> Option<u8> {
@@ -546,7 +550,11 @@ impl FlvDemuxer {
                                 };
                                 next_scale = (last_scale + delta + 256) % 256;
                             }
-                            last_scale = if next_scale == 0 { last_scale } else { next_scale };
+                            last_scale = if next_scale == 0 {
+                                last_scale
+                            } else {
+                                next_scale
+                            };
                         }
                     }
                 }
@@ -625,8 +633,8 @@ impl FlvDemuxer {
         };
 
         let width = (width_in_mbs + 1) * 16 - crop_unit_x * (crop_l + crop_r);
-        let height =
-            (2 - frame_mbs_only as u32) * (height_in_map_units + 1) * 16 - crop_unit_y * (crop_t + crop_b);
+        let height = (2 - frame_mbs_only as u32) * (height_in_map_units + 1) * 16
+            - crop_unit_y * (crop_t + crop_b);
 
         if width > 0 && height > 0 {
             self.video_width = width;

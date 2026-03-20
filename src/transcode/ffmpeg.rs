@@ -44,13 +44,11 @@ impl RenditionCtx {
         // ------------------------------------------------------------------
         // Encoder
         // ------------------------------------------------------------------
-        let codec =
-            ffmpeg::codec::encoder::find(ffmpeg::codec::Id::H264).ok_or_else(|| {
-                TranscodeError::FfmpegInit {
-                    reason:
-                        "libx264 encoder not found — rebuild FFmpeg with --enable-libx264".into(),
-                }
-            })?;
+        let codec = ffmpeg::codec::encoder::find(ffmpeg::codec::Id::H264).ok_or_else(|| {
+            TranscodeError::FfmpegInit {
+                reason: "libx264 encoder not found — rebuild FFmpeg with --enable-libx264".into(),
+            }
+        })?;
 
         let mut video = ffmpeg::codec::Context::new_with_codec(codec)
             .encoder()
@@ -86,9 +84,14 @@ impl RenditionCtx {
             &format!("keyint={ki}:min-keyint={ki}:scenecut=0"),
         );
 
-        let encoder = video.open_with(opts).map_err(|e| TranscodeError::FfmpegInit {
-            reason: format!("x264 open ({} {}p {}kbps): {e}", rendition.id, rendition.height, rendition.video_bitrate_kbps),
-        })?;
+        let encoder = video
+            .open_with(opts)
+            .map_err(|e| TranscodeError::FfmpegInit {
+                reason: format!(
+                    "x264 open ({} {}p {}kbps): {e}",
+                    rendition.id, rendition.height, rendition.video_bitrate_kbps
+                ),
+            })?;
 
         // ------------------------------------------------------------------
         // Scaler
@@ -103,7 +106,10 @@ impl RenditionCtx {
             ffmpeg::software::scaling::flag::Flags::BILINEAR,
         )
         .map_err(|e| TranscodeError::FfmpegInit {
-            reason: format!("swscale ({source_width}x{source_height} → {}x{}): {e}", rendition.width, rendition.height),
+            reason: format!(
+                "swscale ({source_width}x{source_height} → {}x{}): {e}",
+                rendition.width, rendition.height
+            ),
         })?;
 
         let output_frame = ffmpeg::frame::video::Video::new(
@@ -158,10 +164,7 @@ impl RenditionCtx {
         let mut packets = Vec::new();
         let mut pkt = ffmpeg::Packet::empty();
         while self.encoder.receive_packet(&mut pkt).is_ok() {
-            let data = pkt
-                .data()
-                .map(Bytes::copy_from_slice)
-                .unwrap_or_default();
+            let data = pkt.data().map(Bytes::copy_from_slice).unwrap_or_default();
             packets.push(EncodedPacket {
                 pts: pkt.pts().unwrap_or(0),
                 _dts: pkt.dts().unwrap_or(0),
@@ -230,12 +233,11 @@ pub(super) fn transcode_blocking(
     // ------------------------------------------------------------------
     // H.264 decoder
     // ------------------------------------------------------------------
-    let h264_codec =
-        ffmpeg::codec::decoder::find(ffmpeg::codec::Id::H264).ok_or_else(|| {
-            TranscodeError::FfmpegInit {
-                reason: "H264 decoder not found".into(),
-            }
-        })?;
+    let h264_codec = ffmpeg::codec::decoder::find(ffmpeg::codec::Id::H264).ok_or_else(|| {
+        TranscodeError::FfmpegInit {
+            reason: "H264 decoder not found".into(),
+        }
+    })?;
 
     let mut decoder = ffmpeg::codec::Context::new_with_codec(h264_codec)
         .decoder()
@@ -263,7 +265,12 @@ pub(super) fn transcode_blocking(
             // AAC passthrough — fan out unchanged to all rendition accumulators.
             // Capture sample rate/channels from the first audio frame so each
             // emitted segment carries the correct AudioSpecificConfig params.
-            if let crate::core::types::Track::Audio { sample_rate, channels, .. } = dmx.track {
+            if let crate::core::types::Track::Audio {
+                sample_rate,
+                channels,
+                ..
+            } = dmx.track
+            {
                 for acc in &mut accumulators {
                     acc.set_audio_params(sample_rate, channels);
                 }
@@ -383,10 +390,9 @@ pub(super) fn transcode_vod_from_file_blocking(
         reason: format!("ffmpeg_init: {e}"),
     })?;
 
-    let mut ictx =
-        ffmpeg::format::input(&file_path).map_err(|e| TranscodeError::FfmpegInit {
-            reason: format!("open container: {e}"),
-        })?;
+    let mut ictx = ffmpeg::format::input(&file_path).map_err(|e| TranscodeError::FfmpegInit {
+        reason: format!("open container: {e}"),
+    })?;
 
     // Identify best video and (optional) audio stream indices before we start
     // iterating packets (which mutably borrows ictx).

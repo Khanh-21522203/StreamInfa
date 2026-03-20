@@ -15,11 +15,9 @@ static X_STREAMINFA_STREAM_ID: HeaderName = HeaderName::from_static("x-streaminf
 use crate::control::state::StreamState;
 use crate::core::auth::TokenStatus;
 use crate::core::security::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT};
-use crate::core::types::{IngestMode, StreamId};
 #[cfg(not(feature = "ffmpeg"))]
-use crate::core::types::{
-    DemuxedFrame, Track, VideoCodec, INGEST_TRANSCODE_CHANNEL_CAP,
-};
+use crate::core::types::{DemuxedFrame, Track, VideoCodec, INGEST_TRANSCODE_CHANNEL_CAP};
+use crate::core::types::{IngestMode, StreamId};
 use crate::observability::metrics as obs;
 use crate::storage::MediaStore;
 

@@ -439,7 +439,14 @@ impl RtmpConnection {
 
         // Phase 4-5: Demux loop (continues with already-primed demuxer/chunk_reader)
         let demux_result = self
-            .run_demux_loop(&mut socket, stream_id, peer_addr, frame_tx, demuxer, chunk_reader)
+            .run_demux_loop(
+                &mut socket,
+                stream_id,
+                peer_addr,
+                frame_tx,
+                demuxer,
+                chunk_reader,
+            )
             .await;
 
         // Phase 6: Stream end — finalize
@@ -598,7 +605,10 @@ impl RtmpConnection {
                 RtmpMessageType::SetChunkSize => {
                     if msg.data.len() >= 4 {
                         let new_size = u32::from_be_bytes([
-                            msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                            msg.data[0],
+                            msg.data[1],
+                            msg.data[2],
+                            msg.data[3],
                         ]) as usize;
                         chunk_reader.set_chunk_size(new_size);
                     }
