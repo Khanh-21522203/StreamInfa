@@ -1,0 +1,43 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        filters:
+          - name: label
+            values: ["com.docker.compose.project"]
+    relabel_configs:
+      # Container name without leading slash
+      - source_labels: [__meta_docker_container_name]
+        regex: "/?(.*)"
+        target_label: container
+      # Compose service name as a label
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      # stdout vs stderr
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+    pipeline_stages:
+      # Parse JSON log lines emitted by streaminfa (LOG_FORMAT=json)
+      - json:
+          expressions:
+            level: level
+            message: message
+            target: target
+            stream_id: stream_id
+      - labels:
+          level:
+          stream_id:
+      - output:
+          source: message

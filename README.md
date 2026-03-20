@@ -193,84 +193,91 @@ Terms:
 - **Segment index** — the in-memory data structure that tracks which segments exist for a stream. Adding a segment updates the index and triggers a playlist regeneration.
 - **p50 / p95** — percentiles. p50 (median) is the midpoint latency; p95 means 95% of requests finished faster than this value. p95 is the primary indicator for tail latency and SLO health.
 
-Snapshot (2026-03-19, docker-compose + MinIO, `--features s3,ffmpeg`, k6 0.50.0):
+Snapshot (2026-03-20, docker-compose + MinIO, `--features s3,ffmpeg`, k6 0.50.0):
 
-**Control** (20 VUs, 30s):
+**Control** (20 list + 5 create/delete VUs, 30s):
 
 | Case | Description | avg_ms | p50 | p95 | qps |
 |------|-------------|-------:|----:|----:|----:|
-| `list_streams` | GET /api/v1/streams — list all streams | 9.11 | 0.622 | 45.21 | — |
-| `create_delete_stream` | POST + DELETE /api/v1/streams — full create/delete round trip | 27.55 | 46.36 | 52.87 | — |
-| overall | all control requests combined | 13.91 | 0.753 | 48.12 | 246.4 |
+| `list_streams` | GET /api/v1/streams — list all streams | 10.17 | 0.523 | 45.39 | — |
+| `create_delete_stream` | POST + DELETE /api/v1/streams — full create/delete round trip | 27.15 | 45.54 | 53.14 | — |
+| overall | all control requests combined | 14.63 | 0.648 | 48.01 | 244.9 |
 
-**Ingest** (2 VUs, 30s, 1.1 MB fixture — 30s 1280x720 H.264, real FFmpeg transcode, 2 renditions, veryfast preset):
+**Ingest** (2 VUs, 30s, 2.6 MB fixture — 10s 1280x720 H.264, real FFmpeg transcode, 2 renditions, veryfast preset):
 
-Each VU uploads a file, polls until the stream reaches READY, then deletes it. The qps column is **upload cycles/s**, not raw HTTP requests/s. `upload_to_ready` reflects real H.264 decode + libx264 encode to 720p and 480p renditions + fMP4 packaging + S3 write — approximately 9× realtime for a 30-second clip.
+Each VU uploads a file, polls until the stream reaches READY, then deletes it. The qps column is **upload cycles/s**, not raw HTTP requests/s. `upload_to_ready` reflects real H.264 decode + libx264 encode to 720p and 480p renditions + fMP4 packaging + S3 write — approximately 300× realtime for a 10-second clip.
 
 | Case | Description | avg_ms | p50 | p95 | cycles/s |
 |------|-------------|-------:|----:|----:|---------:|
-| `upload_request_duration_ms` | Time for the POST /api/v1/streams/upload HTTP response only — server accepted the file but pipeline has not started yet | 4.578 | 4.483 | 5.527 | 0.6 |
-| `upload_to_ready_duration_ms` | Time from upload accepted → stream state reaches READY (full pipeline: FFmpeg transcode + package + S3 write) | 3,292 | 3,514 | 3,515 | 0.6 |
+| `upload_request_duration_ms` | Time for the POST /api/v1/streams/upload HTTP response only — server accepted the file but pipeline has not started yet | 4.72 | 4.21 | 8.37 | 0.6 |
+| `upload_to_ready_duration_ms` | Time from upload accepted → stream state reaches READY (full pipeline: FFmpeg transcode + package + S3 write) | 3,015 | 3,015 | 3,018 | 0.6 |
 
 **Delivery** (20 VUs, 30s):
 
 | Case | Description | avg_ms | p50 | p95 | qps |
 |------|-------------|-------:|----:|----:|----:|
-| `http_req_duration` | Each iteration fetches master playlist + media playlist + init segment + one segment | 1.37 | 0.294 | 5.59 | 752.8 |
+| `http_req_duration` | Each iteration fetches master playlist + media playlist + init segment + one segment | 1.11 | 0.285 | 4.30 | 758.9 |
 
 **Soak** (20 delivery + 2 control VUs, 30s):
 
 | Case | Description | avg_ms | p50 | p95 | qps |
 |------|-------------|-------:|----:|----:|----:|
-| `http_req_duration` | Mixed delivery reads and control list/create/delete under sustained load | 0.986 | 0.392 | 3.28 | 770.7 |
+| `http_req_duration` | Mixed delivery reads and control list/create/delete under sustained load | 1.13 | 0.286 | 4.33 | 764.7 |
 
 **Overload** (80 delivery + 8 control churn VUs, 2m):
 
 | Case | Description | avg_ms | p50 | p95 | qps |
 |------|-------------|-------:|----:|----:|----:|
-| `http_req_duration` | Delivery reads at extreme concurrency; control churn continuously creates/deletes streams | 8.13 | 5.36 | 21.66 | 10,662 |
+| `http_req_duration` | Delivery reads at extreme concurrency; control churn continuously creates/deletes streams | 11.53 | 5.41 | 38.77 | 7,545.8 |
 
 **Capacity search** (p95 threshold = 400ms, delivery read path):
 
-Read-only workload: each VU repeatedly fetches master playlist + media playlist + init segment + one media segment (no uploads, no transcoding). Steps VUs from 20 → 200 in increments of 20, each step runs 20s. A step passes if p95 latency stays under 400ms and error rate is 0%. All steps passed — the server scales linearly and has not hit saturation at 200 VUs.
+Read-only workload: each VU repeatedly fetches master playlist + media playlist + init segment + one media segment (no uploads, no transcoding). Steps VUs from 10 → 200 in increments of 10, each step runs 20s. A step passes if p95 latency stays under 400ms and error rate is 0%. All steps passed — the server scales linearly and has not hit saturation at 200 VUs.
 
 | VUs | avg_ms | p95_ms | req/s |
 |----:|-------:|-------:|------:|
-| 20 | 0.928 | 3.14 | 1,469 |
-| 40 | 0.927 | 3.12 | 2,944 |
-| 60 | 0.963 | 3.26 | 4,400 |
-| 80 | 0.919 | 3.09 | 5,887 |
-| 100 | 0.862 | 2.92 | 7,390 |
-| 120 | 0.853 | 2.90 | 8,880 |
-| 140 | 0.910 | 3.06 | 10,318 |
-| 160 | 1.010 | 3.47 | 11,691 |
-| 180 | 1.830 | 6.69 | 12,365 |
-| 200 | 1.510 | 5.20 | 14,073 |
+| 10 | 1.19 | 4.65 | 718.9 |
+| 20 | 1.28 | 5.04 | 1,428.4 |
+| 30 | 1.23 | 4.80 | 2,151.6 |
+| 40 | 1.23 | 4.68 | 2,871.9 |
+| 50 | 1.25 | 4.84 | 3,587.2 |
+| 60 | 1.28 | 4.90 | 4,293.9 |
+| 70 | 1.31 | 5.02 | 4,995.4 |
+| 80 | 1.38 | 5.22 | 5,681.0 |
+| 90 | 1.43 | 5.40 | 6,367.7 |
+| 100 | 1.55 | 6.00 | 7,020.8 |
+| 110 | 1.73 | 6.69 | 7,620.4 |
+| 120 | 2.46 | 9.72 | 7,898.2 |
+| 130 | 2.86 | 11.36 | 8,323.9 |
+| 140 | 4.06 | 15.89 | 8,298.7 |
+| 150 | 5.85 | 22.88 | 8,014.3 |
+| 160 | 6.86 | 26.63 | 8,100.1 |
+| 170 | 7.94 | 30.42 | 8,129.0 |
+| 180 | 9.63 | 36.65 | 7,960.2 |
+| 190 | 11.66 | 44.29 | 7,684.7 |
+| 200 | 13.00 | 48.73 | 7,663.7 |
 
-Max passing VUs: 200. No failures found up to `CAPACITY_MAX_VUS=200`.
+Max passing VUs: 200. No failures found up to `CAPACITY_MAX_VUS=200`. Throughput peaks around 120–140 VUs (~8,300 req/s) and p95 starts rising above 10ms beyond 130 VUs as the LRU cache is warmed across segments.
 
 **Ops path** (single node, memory backend):
 
 | Metric | Value |
 |--------|------:|
-| startup → `/healthz` 200 | 10 ms |
-| startup → `/readyz` 200 | 67 ms |
-| `/healthz` probe avg | 8 ms |
-| `/readyz` probe avg | 52 ms |
-| graceful shutdown | 49 ms |
+| `/healthz` probe avg | 9 ms |
+| `/readyz` probe avg | 76 ms |
 
-**Pipeline microbenchmarks** (Criterion, release, `--features s3,ffmpeg`; post-allocation-optimization):
+**Pipeline microbenchmarks** (Criterion, release, `--features s3,ffmpeg`):
 
 | Benchmark | Description | time (µs) |
 |-----------|-------------|----------:|
-| `manifest_generation/master_playlist_3_renditions` | Generate HLS multivariant playlist for 3 renditions | 1.072 |
-| `manifest_generation/media_playlist_live/6` | Generate live media playlist with 6-segment sliding window | 2.616 |
-| `manifest_generation/media_playlist_live/24` | Same, 24-segment window | 9.731 |
-| `manifest_generation/media_playlist_live/120` | Same, 120-segment window | 47.436 |
-| `init_segment_generation` | Build fMP4 init segment (called once per stream, not on hot path) | 4.032 |
-| `segment_index/add_segment_and_generate_playlist/6` | Append segment to index + regenerate playlist, 6 segments total | 6.109 |
-| `segment_index/add_segment_and_generate_playlist/12` | Same, 12 segments | 11.750 |
-| `segment_index/add_segment_and_generate_playlist/24` | Same, 24 segments | 23.149 |
+| `manifest_generation/master_playlist_3_renditions` | Generate HLS multivariant playlist for 3 renditions | 1.023 |
+| `manifest_generation/media_playlist_live/6` | Generate live media playlist with 6-segment sliding window | 2.585 |
+| `manifest_generation/media_playlist_live/24` | Same, 24-segment window | 10.069 |
+| `manifest_generation/media_playlist_live/120` | Same, 120-segment window | 48.971 |
+| `init_segment_generation` | Build fMP4 init segment (called once per stream, not on hot path) | 3.866 |
+| `segment_index/add_segment_and_generate_playlist/6` | Append segment to index + regenerate playlist, 6 segments total | 6.105 |
+| `segment_index/add_segment_and_generate_playlist/12` | Same, 12 segments | 11.372 |
+| `segment_index/add_segment_and_generate_playlist/24` | Same, 24 segments | 22.811 |
 
 Numbers are local single-node, all services on one host. Not representative of production (real network, TLS, multi-stream load, larger segments).
 

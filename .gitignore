@@ -29,5 +29,13 @@ temp/
 /.tmp/
 /scripts/k6/fixtures/upload-sample.mp4
 
+# Docker volume data (bind mounts — local state, not for version control)
+/docker/data/uploads/*
+/docker/data/minio/*
+/docker/data/prometheus/*
+/docker/data/loki/*
+/docker/data/grafana/*
+!/docker/data/**/.gitkeep
+
 /.claude
 /tasks
