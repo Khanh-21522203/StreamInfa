@@ -52,15 +52,10 @@ impl<'a> BitReader<'a> {
     /// Read an exp-Golomb coded unsigned integer.
     fn read_ue(&mut self) -> Option<u32> {
         let mut leading_zeros = 0u32;
-        loop {
-            match self.read_bit()? {
-                0 => {
-                    leading_zeros += 1;
-                    if leading_zeros > 31 {
-                        return None; // malformed / overflow guard
-                    }
-                }
-                _ => break,
+        while let 0 = self.read_bit()? {
+            leading_zeros += 1;
+            if leading_zeros > 31 {
+                return None; // malformed / overflow guard
             }
         }
         if leading_zeros == 0 {
