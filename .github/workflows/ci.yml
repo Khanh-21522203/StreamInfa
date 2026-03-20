@@ -36,6 +36,46 @@ jobs:
       - name: Compile check with s3 feature
         run: cargo check --features s3
 
+  release-ffmpeg-policy:
+    name: release-builds-require-ffmpeg-feature
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enforce ffmpeg feature on release cargo commands
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t release_lines < <(
+            grep -RInE 'cargo (build|check|test|run)[^#]*(--release|--profile[[:space:]=]release)' .github/workflows || true
+          )
+
+          if [[ ${#release_lines[@]} -eq 0 ]]; then
+            echo "No release cargo commands found in workflows; guardrail check passed."
+            exit 0
+          fi
+
+          bad=0
+          for line in "${release_lines[@]}"; do
+            cmd="${line#*:*:}"
+            trimmed="${cmd#"${cmd%%[![:space:]]*}"}"
+            if [[ "$trimmed" == \#* ]]; then
+              continue
+            fi
+
+            if ! echo "$cmd" | grep -Eq -- '--features(=|[[:space:]]+)[^#[:cntrl:]]*ffmpeg'; then
+              echo "::error::Release cargo command missing ffmpeg feature: $line"
+              bad=1
+            fi
+          done
+
+          if [[ "$bad" -ne 0 ]]; then
+            echo "Release-like cargo commands must include '--features ffmpeg'."
+            exit 1
+          fi
+
   security:
     name: dependency-audit
     runs-on: ubuntu-latest

@@ -38,6 +38,11 @@ async fn main() -> ExitCode {
         }
     };
 
+    if let Err(message) = enforce_ffmpeg_guardrail() {
+        eprintln!("{message}");
+        return ExitCode::FAILURE;
+    }
+
     // Initialize tracing / logging
     let log_reload_handle = init_tracing(
         &config.observability.log_level,
@@ -439,6 +444,26 @@ fn init_tracing(
     }
 
     reload_handle
+}
+
+#[cfg(feature = "ffmpeg")]
+fn enforce_ffmpeg_guardrail() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn enforce_ffmpeg_guardrail() -> Result<(), String> {
+    let env_name = std::env::var("STREAMINFA_ENV").unwrap_or_else(|_| "development".to_string());
+    let env_name = env_name.to_ascii_lowercase();
+    let is_dev_like = matches!(env_name.as_str(), "development" | "dev" | "test");
+    if is_dev_like {
+        return Ok(());
+    }
+
+    Err(format!(
+        "fatal: binary built without feature 'ffmpeg' is not allowed for STREAMINFA_ENV='{}'; rebuild with `--features ffmpeg`",
+        env_name
+    ))
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ DELIVERY_SEGMENT="${DELIVERY_SEGMENT:-000000.m4s}"
 DELIVERY_USE_RANGE="${DELIVERY_USE_RANGE:-1}"
 AUTO_PREPARE_DELIVERY="${AUTO_PREPARE_DELIVERY:-1}"
 UPLOAD_SAMPLE_SIZE_BYTES="${UPLOAD_SAMPLE_SIZE_BYTES:-262144}"
+ALLOW_SYNTHETIC_UPLOAD_FIXTURE="${ALLOW_SYNTHETIC_UPLOAD_FIXTURE:-0}"
 METRICS_SNAPSHOT="${METRICS_SNAPSHOT:-1}"
 METRICS_URL="${METRICS_URL:-http://localhost:8080/metrics}"
 
@@ -71,6 +72,7 @@ Environment:
   INGEST_READY_TIMEOUT_SECS Max wait for upload stream to reach READY (default: 120)
   INGEST_POLL_INTERVAL_MS  Poll interval for READY check (default: 500)
   UPLOAD_SAMPLE_SIZE_BYTES Generated upload fixture size in bytes (default: 262144)
+  ALLOW_SYNTHETIC_UPLOAD_FIXTURE Set to 1 to allow synthetic upload fixture fallback when ffmpeg/ffprobe are missing (default: 0)
 
   DELIVERY_STREAM_ID       Required for delivery benchmark unless AUTO_PREPARE_DELIVERY=1
   DELIVERY_RENDITION       Rendition for delivery benchmark (default: high)
@@ -159,7 +161,13 @@ ensure_upload_fixture() {
         return
     fi
 
-    # Fallback: synthetic placeholder (no real video, only works with placeholder transcoding).
+    if [[ "${ALLOW_SYNTHETIC_UPLOAD_FIXTURE}" != "1" ]]; then
+        echo "ERROR: ffmpeg and ffprobe are required to generate benchmark upload fixture." >&2
+        echo "Install ffmpeg/ffprobe, or explicitly opt in to synthetic fallback with ALLOW_SYNTHETIC_UPLOAD_FIXTURE=1." >&2
+        exit 1
+    fi
+
+    # Fallback: synthetic fixture (no real video; explicit opt-in for non-production testing only).
     if [[ "${UPLOAD_SAMPLE_SIZE_BYTES}" -lt 12 ]]; then
         echo "ERROR: UPLOAD_SAMPLE_SIZE_BYTES must be >= 12" >&2
         exit 1
@@ -174,7 +182,7 @@ ensure_upload_fixture() {
         return
     fi
 
-    echo "Generating placeholder fixture: ${UPLOAD_FIXTURE_HOST} (${UPLOAD_SAMPLE_SIZE_BYTES} bytes)"
+    echo "Generating SYNTHETIC opt-in fixture: ${UPLOAD_FIXTURE_HOST} (${UPLOAD_SAMPLE_SIZE_BYTES} bytes)"
     : > "${UPLOAD_FIXTURE_HOST}"
     printf '\x00\x00\x00\x18ftypisom' > "${UPLOAD_FIXTURE_HOST}"
     if [[ "${UPLOAD_SAMPLE_SIZE_BYTES}" -gt 12 ]]; then
